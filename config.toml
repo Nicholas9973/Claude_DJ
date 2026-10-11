@@ -1,0 +1,68 @@
+# Claude_music configuration. Edit freely; restart to apply.
+
+[music]
+# Any music service linked in your Sonos app: "Qobuz", "Spotify", "TIDAL", ...
+# (after changing it, run `python -m music_agent.cli services` to check it works)
+service = "Qobuz"
+
+[sonos]
+# Where music plays when a request names no room: "all", or a list like ["Night", "Morn"]
+default_rooms = "all"
+# When grouping speakers, every speaker is set to this speaker's current volume.
+volume_source = "Dining Room"
+# Optional fixed speaker IPs; skips network discovery (faster, more reliable on Windows).
+# hosts = ["192.168.1.10", "192.168.1.11", "192.168.1.12"]
+hosts = []
+discovery_timeout = 5
+
+[agent]
+# "sonnet" (default), "haiku" (faster, uses less of your credit) or "opus".
+model = "sonnet"
+max_turns = 20
+# Remove ANTHROPIC_API_KEY from the agent's environment so it always uses your
+# Claude subscription login instead of paid API billing.
+require_subscription = true
+# One JSON line per request: prompt, tool calls, reply, tokens, cost.
+log_dir = "data/logs"
+
+[location]
+# Your town, for weather-aware choices (e.g. "Lyon"). Leave empty to skip weather.
+# Tip: put personal values like this in config.local.toml (git-ignored) instead.
+city = ""
+# Or exact coordinates instead:
+# latitude = 48.85
+# longitude = 2.35
+
+[memory]
+# What was played, skipped, liked and said. Delete the file to start fresh.
+path = "data/music.db"
+# Feedback fades: after this many days it counts half as much.
+half_life_days = 60
+watch_interval_s = 15
+
+[discord]
+# Token and IDs live in .env (see .env.example), not here.
+# A conversation remembers earlier messages ("more like that"). It restarts
+# after this much quiet, or this many requests, so each request stays cheap.
+idle_reset_minutes = 60
+max_turns_per_conversation = 20
+# Add 👍 👎 ⏭️ under replies that started music: one tap to like / dislike+skip / skip.
+feedback_reactions = true
+
+[gui]
+# The web GUI (python -m music_agent.gui). It has no login, so keep it on this PC only.
+host = "127.0.0.1"
+port = 8765
+open_browser = true
+# Also run the Discord bot inside the GUI process (don't run dj-bot separately as well).
+start_bot = true
+
+[safety]
+# Enforced in code; the agent cannot override these.
+max_volume = 35
+quiet_start = "23:59"
+quiet_end = "08:00"
+# "block": refuse to start playback during quiet hours
+# "cap":   allow it, but cap volume at quiet_max_volume
+quiet_mode = "block"
+quiet_max_volume = 15
