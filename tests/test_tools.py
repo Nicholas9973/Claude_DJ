@@ -113,6 +113,20 @@ def test_play_records_plays_with_request_and_tells_watcher():
     assert tools.watcher._ignore_next is True
 
 
+def test_music_for_others_is_recorded_as_such():
+    memory = make_memory()
+    tools, _ = make_tools(memory=memory)
+    out = run(tools.play_tracks([{"title": "So What", "artist": "Miles Davis"}], for_others=True))
+    assert out["for_others"] is True and memory.queue_audience == "others"
+    assert memory.db.query("SELECT audience FROM plays")[0]["audience"] == "others"
+    run(tools.play_item("fake|album|a1"))                                # a new queue for the owner again
+    assert memory.queue_audience == "me"
+    memory.set_guest_mode(3)
+    ctx = run(tools.get_context())
+    assert ctx["guest_mode"].startswith("on until")
+    assert run(tools.play_tracks([{"title": "Pecadora", "artist": "Lila Downs"}]))["for_others"] is True
+
+
 def test_feedback_tool_resolves_current_track():
     m = make_memory()
     tools, house = make_tools(memory=m)

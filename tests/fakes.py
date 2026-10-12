@@ -219,6 +219,54 @@ def fake_weather_fetch(calls):
     return fetch
 
 
+def fake_trackinfo_fetch(calls, fail=()):
+    """Stands in for MusicBrainz and Deezer: knows "Superstition" by Stevie Wonder, nothing else.
+
+    Records each URL in `calls`; raises for URLs containing any text in `fail`.
+    """
+    def fetch(url, params):
+        calls.append(url)
+        if any(f in url for f in fail):
+            raise OSError("offline")
+        known = "Superstition" in str(params.get("query", params.get("q", "")))
+        if url.endswith("/recording"):
+            stevie = [{"name": "Stevie Wonder", "artist": {"id": "sw"}}]
+            return {"recordings": [] if not known else [
+                {"score": 100, "title": "Superstition", "first-release-date": "1972-10-27", "artist-credit": stevie,
+                 "tags": [{"name": "soul", "count": 5}, {"name": "funk", "count": 3},
+                          {"name": "dance/by-style/ddr", "count": 9}]},
+                {"score": 100, "title": "Superstition (live)", "first-release-date": "1980", "artist-credit": stevie,
+                 "tags": [{"name": "funk", "count": 4}]},
+                {"score": 100, "title": "Superstition", "first-release-date": "1971",       # another artist's song
+                 "artist-credit": [{"name": "Beck, Bogert & Appice", "artist": {"id": "bba"}}]},
+            ]}
+        if "/artist/" in url:
+            return {"genres": [{"name": "soul", "count": 11}, {"name": "funk", "count": 4}]}
+        if url.endswith("/search"):
+            return {"data": [] if not known else [
+                {"id": 1, "title": "Superstition", "rank": 500_000, "artist": {"name": "Stevie Wonder"}},
+                {"id": 2, "title": "Superstition", "rank": 736_361, "artist": {"name": "Stevie Wonder"}},
+                {"id": 3, "title": "Superstition", "rank": 999_999, "artist": {"name": "Someone Else"}}]}
+        if "/track/" in url:
+            return {"bpm": 200.7}    # Deezer's usual doubling
+        raise AssertionError(url)
+    return fetch
+
+
+class FakeTrackInfo:
+    """Stands in for TrackInfoService in the curator's tests: popularity from a dict, no network."""
+
+    def __init__(self, popularity=None):
+        self.popularity_of = popularity or {}
+        self.calls = []
+
+    def look_up(self, title, artist, refresh=False):
+        self.calls.append((title, artist))
+        if title not in self.popularity_of:
+            return {"title": title, "artist": artist, "status": "not_found"}
+        return {"title": title, "artist": artist, "status": "found", "popularity": self.popularity_of[title]}
+
+
 # ----------------------------------------------------------------- agent
 class ScriptedAgent:
     """Stands in for MusicAgent: real MusicTools, scripted Claude behaviour."""

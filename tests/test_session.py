@@ -59,6 +59,8 @@ def test_each_role_gets_its_own_prompt_and_tools():
     # Only the curator edits taste; only the DJ changes the volume.
     assert "set_volume" in ROLE_TOOLS["dj"] and "set_volume" not in ROLE_TOOLS["curator"]
     assert "add_preference" in ROLE_TOOLS["curator"] and "add_preference" not in ROLE_TOOLS["dj"]
+    # Only the curator (GUI only) can make the code look tracks up online; the DJ reads Discord messages.
+    assert "look_up_tracks" in ROLE_TOOLS["curator"] and "look_up_tracks" not in ROLE_TOOLS["dj"]
     assert (dj.tools.source, curator.tools.source) == ("dj", "curator")   # recorded with each play
     with pytest.raises(ValueError):
         MusicAgent(_app(), role="admin")

@@ -64,17 +64,25 @@ starts the Discord bot, so this one command runs everything. (Don't run
   slider per room: set Night 5 quieter than the Dining Room and that balance is
   remembered, so the main slider and new DJ sets move all rooms together.
   "Level all" puts them back at one level. The DJ can do this too ("turn Night
-  down a bit").
+  down a bit"). **Guest mode** ("Guests over") marks everything that plays for
+  the next 4 hours as music for others, so it doesn't train your taste; the DJ
+  also does this by itself for requests like "something for the party".
 - **Chat**: the taste curator. Tell it what you like or don't ("more bossa
   nova in the evenings", "a bit less Radiohead lately"), say "quiz me" for a
   listening quiz (it plays samples, offers one-tap answers, and asks about
-  patterns in what you skip or finish), or ask for a playlist ("make a playlist
-  for cooking dinner"). It keeps a notebook, so later quizzes build on earlier ones.
+  patterns in what you skip), or ask for a playlist ("make a playlist for
+  cooking dinner"). It keeps a notebook, so later quizzes build on earlier ones.
+  What it concludes in a quiz becomes a tentative *finding* until enough
+  samples back it (see Learning below). It can also look up a track's year,
+  tempo, style tags and popularity.
 - **Playlists**: saved playlists. Play, shuffle or queue them; rename them and
   edit the description (the DJ reads it to decide when a playlist fits); add
   or remove tracks.
 - **Taste**: everything that shapes the DJ, all editable:
-  - your stated preferences (add, edit, remove);
+  - your stated preferences (add, edit, remove), including how often a love
+    should come up and when ("The Hu: rarely, at the gym");
+  - the curator's quiz findings with the samples behind them (confirm once
+    the evidence is enough, drop, reword);
   - a score for every artist and track, showing where it came from, with
     buttons to nudge it up or down, reset what was learned (history is kept),
     or save it as a stated love/avoid;
@@ -82,6 +90,7 @@ starts the Discord bot, so this one command runs everything. (Don't run
     DJ sees them) and every piece of feedback (edit or forget it, or add new);
   - the scoring settings: how much each signal counts, how fast feedback
     fades, and where "liked" and "avoided" begin;
+  - what the DJ is resting because it played it a lot lately;
   - the raw profile Claude sees.
 - **Database**: browse, search and edit every table in `music.db`. Click a cell
   to change it (lists for fixed choices, date pickers for times), add rows, ×
@@ -119,6 +128,7 @@ python -m music_agent.cli volume 20 | +3 | -5
 python -m music_agent.cli play "Get Lucky" --artist "Daft Punk" [--rooms Night]
 python -m music_agent.cli find "Cielito Lindo" --artist "Lila Downs" --explain
 python -m music_agent.cli taste | feedback | forget 12     # what the agent has learned
+python -m music_agent.cli info "Superstition" --artist "Stevie Wonder"   # year, tempo, tags, popularity
 python -m music_agent.cli link | services                  # music service account
 ```
 
@@ -127,18 +137,19 @@ python -m music_agent.cli link | services                  # music service accou
 | Piece | What it does |
 |---|---|
 | `music_agent/agent/tools.py` | The DJ's actions: get context, queue tracks, play a saved playlist, search, controls, volume, record feedback. |
-| `music_agent/agent/curator_tools.py` | The curator's extra actions: read the taste profile and listening history, add/change/remove preferences, nudge or reset scores, write in its notebook, forget feedback, save playlists. |
+| `music_agent/agent/curator_tools.py` | The curator's extra actions: read the taste profile and listening history, add/change/remove preferences, build quiz findings from evidence, look up track qualities, nudge or reset scores, write in its notebook, forget feedback, save playlists. |
 | `music_agent/agent/prompt.py` | Both agents' instructions in plain English. **Edit this to change their taste and behaviour.** |
 | `music_agent/agent/server.py` | How each tool is described to Claude (names, descriptions, JSON schemas) and which tools each agent gets (`ROLE_TOOLS`). |
 | `music_agent/agent/session.py` | Agent SDK setup: locks everything else down, runs the conversation, logs each request. `role` picks the DJ or the curator. |
 | `music_agent/providers/` | Finding music. `sonos_service.py` searches any service linked in the Sonos app; `base.py` tries progressively broader searches; `matching.py` picks the original recording over covers, karaoke and live versions. |
 | `music_agent/players/sonos.py` | Speakers: grouping, queue, volume. Enforces the volume cap and quiet hours, and recovers from stale speaker state after sleep or network drops. |
 | `music_agent/players/balance.py` | The per-room volume balance (saved in `music.db`), kept when the group volume changes. |
-| `music_agent/learning/memory.py` | Memory (requests, plays, listens, feedback, preferences, adjustments, notebook, settings) and the taste profile Claude sees before choosing. |
+| `music_agent/learning/memory.py` | Memory (requests, plays, listens, feedback, preferences, findings, adjustments, notebook, settings) and the taste profile Claude sees before choosing. |
 | `music_agent/learning/scoring.py` | How signals add up to a score per artist and track, and the tunable numbers (`TUNING`). |
 | `music_agent/learning/playlists.py` | Saved playlists, stored with each track's catalogue ref so playing one needs no searching. |
 | `music_agent/learning/database.py` | The shared SQLite file, plus the generic browse/search/add/edit the Database page uses, with per-table checks. |
 | `music_agent/learning/watcher.py` | Notices tracks you skip early or hear to the end. |
+| `music_agent/trackinfo.py` | Track qualities (original year, approximate tempo, style tags, popularity) from MusicBrainz and Deezer, no keys needed, cached in `music.db`. Only code goes online; the curator gets the results. |
 | `music_agent/weather.py` | Local weather (Open-Meteo, no key). |
 | `music_agent/runtime.py` | The long-running service the GUI and Discord share: one set of speakers, memory and watcher, the bot, and the conversations. |
 | `music_agent/gui/` | The control panel: `routes/` is the JSON API (one file per feature, browse it at `/docs`); `static/` is plain HTML/CSS/JS with one file per page and no build step. |
@@ -150,13 +161,32 @@ Claude Code settings; it can only call the music tools. The volume cap and
 quiet hours are enforced in the player code, so no message can talk it past
 them.
 
-**Learning.** The agent learns from what you say (`record_feedback`), what you
-skip or finish, and what it played recently (no repeats within 24 hours; the
-curator's quiz samples don't count). These add up to a score per artist and
-track, and older signals fade, halving every 60 days. On top of that:
+**Learning.** The agent learns mostly from what you say (`record_feedback`,
+👍 / 👎) and a little from what you skip. These add up to a score per artist
+and track, and older signals fade, halving every 60 days (skips every 30). It
+deliberately ignores some things:
+
+- A track that played to the end counts for nothing by default: music often
+  plays in the background.
+- A skip counts mostly against that track, not the artist, and wears off.
+- A quiz reaction counts fully for the sample but only a little for its
+  artist, never makes the sample a regular, and never decides what you like
+  at a time of day (that needs likes on several different days).
+- Quiz samples, and music played for other people (guest mode, or the DJ
+  noticing "for the party"), don't count at all.
+
+The DJ also sees what it has played a lot in the last two weeks, and rests
+those tracks and artists. On top of the scores:
 
 - *Preferences* you state outright never fade and outrank everything else.
-  They reach the DJ in your words.
+  They reach the DJ in your words. A love can say how often (regularly,
+  sometimes, rarely, only when asked) and when ("at the gym"); anything but
+  "regularly" keeps it out of the liked lists the DJ leans on.
+- *Findings* are what the curator concludes from quizzes ("dislikes K-pop").
+  They stay tentative (a soft hint) until the evidence passes the same bar for
+  every genre: several samples from several artists, not all famous hits,
+  mostly agreeing, and for a dislike one "salvage" try from another side of
+  the genre. The code checks this; the curator can't skip it.
 - *Adjustments* are nudges to a score ("+2 for Nina Simone") that never fade,
   and can *reset* what was learned about an artist or track: older feedback
   and listens are then ignored but kept in the history, so a reset can be undone.

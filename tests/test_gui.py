@@ -298,11 +298,11 @@ def test_tuning_api(gui):
     memory.record_listen("Pecadora", "Lila Downs", "completed", 230, 230)
     tuned = {t["key"]: t for t in client.put("/api/tuning/completed", json={"value": 2}).json()["tuning"]}
     assert tuned["completed"]["value"] == 2 and tuned["completed"]["changed"]
-    assert client.get("/api/taste").json()["profile"]["liked_artists"] == ["Lila Downs"]
+    assert client.get("/api/taste").json()["profile"]["liked_tracks"] == ["Pecadora - Lila Downs"]
     assert client.put("/api/tuning/half_life_days", json={"value": 0}).status_code == 400
     assert client.put("/api/tuning/bogus", json={"value": 1}).status_code == 400
     back = {t["key"]: t for t in client.put("/api/tuning/completed", json={"value": None}).json()["tuning"]}
-    assert back["completed"]["value"] == 0.3 and not back["completed"]["changed"]
+    assert back["completed"]["value"] == 0 and not back["completed"]["changed"]
 
 
 def test_database_search_add_and_column_info(gui):
@@ -337,3 +337,36 @@ def test_per_speaker_volume(gui):
     assert client.post("/api/volume", json={"room": "Attic", "level": 5}).status_code == 400
     assert client.post("/api/volumes/reset").json() == {"volume": 20, "balance": "reset"}
     assert {s.volume for s in house.speakers} == {20}
+
+
+def test_guest_mode_api(gui):
+    client, *_ = gui
+    assert client.get("/api/guest").json() == {"on": False, "until": None}
+    on = client.post("/api/guest", json={"hours": 4}).json()
+    assert on["on"] and on["until"]
+    assert client.post("/api/guest", json={"hours": 30}).status_code == 422
+    assert client.post("/api/guest", json={"hours": None}).json()["on"] is False
+
+
+def test_preferences_can_say_how_often(gui):
+    client, *_ = gui
+    body = {"kind": "artist", "sentiment": "like", "subject": "The Hu", "frequency": "rarely", "context": "gym"}
+    pid = client.post("/api/preferences", json=body).json()["id"]
+    pref = client.get("/api/preferences").json()["preferences"][0]
+    assert (pref["id"], pref["frequency"], pref["context"]) == (pid, "rarely", "gym")
+    bad = {**body, "sentiment": "dislike"}
+    assert client.put(f"/api/preferences/{pid}", json=bad).status_code == 400
+
+
+def test_findings_api(gui):
+    client, _, _, memory = gui
+    fid = memory.add_finding("genre", "K-pop", -1, "Dislikes K-pop")
+    memory.add_evidence(fid, "BTS", -1, "Dynamite", popularity="hit")
+    found = client.get("/api/taste").json()["findings"]
+    assert found[0]["statement"] == "Dislikes K-pop" and not found[0]["check"]["ready"]
+    refused = client.patch(f"/api/findings/{fid}", json={"status": "confirmed"})
+    assert refused.status_code == 400 and "Not enough evidence" in refused.json()["detail"]
+    edited = client.patch(f"/api/findings/{fid}", json={"statement": "Dislikes glossy K-pop", "status": "dropped"})
+    assert edited.json()["finding"]["status"] == "dropped"
+    assert client.delete(f"/api/findings/{fid}").json() == {"ok": True}
+    assert client.delete(f"/api/findings/{fid}").status_code == 404

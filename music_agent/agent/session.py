@@ -107,7 +107,7 @@ class MusicAgent:
                                 memory=self.app.memory, weather=self.app.weather,
                                 watcher=self.app.watcher, playlists=self.app.playlists)
         self.tools.source = role
-        self.curator = CuratorTools(self.tools) if role == "curator" else None
+        self.curator = CuratorTools(self.tools, self.app.trackinfo) if role == "curator" else None
         self.memory = self.app.memory
         self._client: ClaudeSDKClient | None = None
         self._session_cost = 0.0

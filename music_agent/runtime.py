@@ -142,7 +142,7 @@ class Runtime:
         self.tools = MusicTools(app.config, app.player, app.provider, memory=app.memory,
                                 weather=app.weather, watcher=app.watcher, playlists=app.playlists)
         self.tools.source = "gui"
-        self.curator = CuratorTools(self.tools)
+        self.curator = CuratorTools(self.tools, app.trackinfo)
         self.bot = BotRunner(app, agent_factory)
         self.started_at = datetime.now()
         self.log_file: Path | None = None

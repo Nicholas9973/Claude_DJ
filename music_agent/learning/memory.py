@@ -8,15 +8,28 @@ What shapes the profile, from strongest to most subtle:
 
 - *Preferences* are things you state outright, usually via the curator or the
   Taste page ("never Coldplay", "bossa nova in the evening"). They never fade
-  and appear in the profile in your own words.
+  and appear in the profile in your own words. A love can say *how often*
+  (``frequency``: regular, sometimes, rarely, or only when asked) and *when*
+  (``context``, e.g. "at the gym"): "I love The Hu, but rarely" keeps them out
+  of the liked lists without a negative nudge.
 - *Adjustments* are nudges you give a score by hand ("+2 for Nina Simone"), and
   can also *reset what was learned* about an artist or track (older feedback
   and listens are then ignored, but kept in the history). They never fade.
 - *Feedback* is a reaction in the moment ("love this track"). It fades.
+  Reactions during a curator's quiz count less (see ``scoring.py``).
 - *Listens* are what the watcher saw: tracks finished or skipped. They fade.
+  Listens to quiz samples and to music played for other people (a party,
+  guests: ``audience = 'others'``, or *guest mode*) are kept in the history
+  but don't shape the taste.
 - The *notebook* holds notes by the curator (what it asked in quizzes, what it
   noticed) and by you. The curator reads them all; notes marked ``for_dj``
   reach the DJ too, alongside the notes in your feedback.
+- *Findings* are conclusions the curator draws from quizzes ("dislikes K-pop"),
+  each with its evidence: the samples played and how you reacted. A finding
+  stays *tentative* (a soft hint for the DJ) until the evidence is enough:
+  several samples, from several artists, not all famous hits, mostly agreeing,
+  and for a dislike at least one *salvage* try (a sample from another side of
+  it). The same bar applies to every genre; ``check_finding`` says what's missing.
 
 How these add up is in ``scoring.py``; all the weights are tunable
 (``taste_settings`` table, Taste page).
@@ -33,7 +46,7 @@ from typing import Any
 from music_agent.learning.database import Database
 from music_agent.learning.scoring import TUNING, Entry, Scores, check_tuning, fade, track_key
 from music_agent.models import PARTS_OF_DAY, MediaItem, part_of_day
-from music_agent.text import norm
+from music_agent.text import core_title, norm
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +94,24 @@ CREATE TABLE IF NOT EXISTS notebook (         -- notes by the curator and you; t
     text TEXT NOT NULL,
     for_dj INTEGER NOT NULL DEFAULT 0 CHECK (for_dj IN (0, 1))   -- 1: the DJ sees it too, with your notes
 );
+CREATE TABLE IF NOT EXISTS findings (         -- conclusions the curator draws from quizzes
+    id INTEGER PRIMARY KEY, ts TEXT NOT NULL, updated TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('genre', 'artist', 'era', 'mood', 'other')),
+    subject TEXT NOT NULL,                    -- e.g. "K-pop", "70s soul", "long ambient tracks"
+    sentiment INTEGER NOT NULL CHECK (sentiment IN (-1, 0, 1)),   -- likes it / mixed / dislikes it
+    statement TEXT NOT NULL,                  -- the conclusion in words, as the DJ reads it
+    status TEXT NOT NULL DEFAULT 'tentative' CHECK (status IN ('tentative', 'confirmed', 'dropped')),
+    note TEXT
+);
+CREATE TABLE IF NOT EXISTS finding_evidence ( -- the samples behind a finding, and the reaction to each
+    id INTEGER PRIMARY KEY, ts TEXT NOT NULL,
+    finding_id INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    title TEXT, artist TEXT NOT NULL,
+    reaction INTEGER NOT NULL CHECK (reaction IN (-1, 0, 1)),
+    salvage INTEGER NOT NULL DEFAULT 0 CHECK (salvage IN (0, 1)),   -- 1: a try from another side, a fair chance
+    popularity TEXT CHECK (popularity IN ('hit', 'well known', 'known', 'deep cut')),   -- when known
+    note TEXT
+);
 CREATE TABLE IF NOT EXISTS taste_settings (   -- your values for the tunables in scoring.TUNING
     id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, value REAL NOT NULL, ts TEXT NOT NULL
 );
@@ -90,8 +121,18 @@ CREATE INDEX IF NOT EXISTS feedback_ts ON feedback(ts);
 """
 
 PREFERENCE_KINDS = ("artist", "track", "genre", "rule")
+FINDING_KINDS = ("genre", "artist", "era", "mood", "other")
+FINDING_STATUSES = ("tentative", "confirmed", "dropped")
 ADJUSTMENT_KINDS = ("artist", "track")
+AUDIENCES = ("me", "others")          # who music was played for; "others" doesn't train the taste
+FREQUENCIES = ("regular", "sometimes", "rarely", "on_request")   # how often a love should come up
+FREQUENCY_WORDS = {                   # how the profile words it for Claude (wording matters: see CLAUDE.md)
+    "sometimes": "sometimes: now and then, not a staple",
+    "rarely": "rarely: an occasional surprise at most, never a regular",
+    "on_request": "only when asked for, or when the moment clearly calls for it",
+}
 MAX_DELTA = 50.0
+LISTEN_MATCH_HOURS = 12               # a listen belongs to the latest play of that title within this window
 
 
 class Memory:
@@ -106,6 +147,9 @@ class Memory:
 
     Attributes:
         db: The SQLite file; ``PlaylistStore`` and the GUI's database page share it.
+        queue_audience: Who the current queue was started for (``"me"`` or
+            ``"others"``); set whenever an agent or the GUI replaces the queue,
+            so listens to tracks it didn't record (a whole album) still count right.
     """
 
     def __init__(self, path: str | Path, half_life_days: float = 60.0,
@@ -113,20 +157,34 @@ class Memory:
         self.path = Path(path)
         self.half_life_days = half_life_days
         self._now = now_fn
+        self.queue_audience = "me"
+        self._guest_until: datetime | None = None
         self.db = Database(path)
         self.db.add_schema(SCHEMA)
         # Small migrations for files made by older versions.
         self.db.ensure_column("requests", "agent", "TEXT")   # added with the curator
         self.db.ensure_column("plays", "source", "TEXT")     # "dj", "curator" or "gui"
+        audience = "TEXT CHECK (audience IN ('me', 'others'))"
+        self.db.ensure_column("plays", "audience", audience)
+        self.db.ensure_column("listens", "source", "TEXT")   # copied from the play it belongs to
+        self.db.ensure_column("listens", "audience", audience)
+        self.db.ensure_column("feedback", "source", "TEXT")  # "dj", "curator" (a quiz) or "gui"
+        self.db.ensure_column("preferences", "frequency",
+                              "TEXT CHECK (frequency IN ('regular', 'sometimes', 'rarely', 'on_request'))")
+        self.db.ensure_column("preferences", "context", "TEXT")   # when it applies, in your words
+        self._match_old_listens()
         # Edits made on the GUI's Database page must follow the same rules as these methods.
         self.db.add_check("feedback", lambda r: _check_feedback(r["sentiment"], r["scope"], r["title"],
                                                                  r["artist"], r["note"]))
-        self.db.add_check("preferences", lambda r: _check_preference(r["kind"], r["sentiment"], r["subject"],
-                                                                      r["artist"], r["part_of_day"], r["note"]))
+        self.db.add_check("preferences", lambda r: _check_preference(
+            r["kind"], r["sentiment"], r["subject"], r["artist"], r["part_of_day"], r["note"],
+            r["frequency"], r["context"]))
         self.db.add_check("adjustments", lambda r: _check_adjustment(r["kind"], r["subject"], r["delta"],
                                                                       r["ignore_before"]))
         self.db.add_check("taste_settings", lambda r: check_tuning(r["key"], r["value"]))
         self.db.add_check("notebook", lambda r: _check_note(r["author"], r["text"]))
+        self.db.add_check("findings", self._check_finding_row)
+        self.db.add_check("finding_evidence", lambda r: _check_evidence(r["artist"]))
 
     # ------------------------------------------------------------ helpers
     def _stamp(self) -> dict[str, str]:
@@ -152,9 +210,74 @@ class Memory:
             return 1.0
         return fade(age_days, half_life_days)
 
+    def _play_for(self, title: str | None, ts: str) -> dict[str, Any] | None:
+        """The latest play of this title in the hours up to ``ts``: who queued it, and for whom."""
+        try:
+            until = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            return None
+        since = (until - timedelta(hours=LISTEN_MATCH_HOURS)).isoformat(timespec="seconds")
+        rows = self._query("SELECT p.title, p.source, p.audience, r.agent FROM plays p "
+                           "LEFT JOIN requests r ON r.id = p.request_id "
+                           "WHERE p.ts BETWEEN ? AND ? ORDER BY p.ts DESC, p.id DESC", (since, ts))
+        for r in rows:   # titles compared loosely: the speaker and the catalogue may spell them differently
+            if norm(r["title"]) == norm(title):
+                return {"source": r["source"] or r["agent"], "audience": r["audience"]}
+        return None
+
+    def _match_old_listens(self) -> None:
+        """Fill in who queued each listen, and for whom, for listens recorded before that was kept.
+
+        Listens with no matching play (music started from the Sonos app) stay
+        empty, which counts as your own listening.
+        """
+        for r in self._query("SELECT id, ts, title FROM listens WHERE source IS NULL AND audience IS NULL"):
+            play = self._play_for(r["title"], r["ts"])
+            if play:
+                self.db.execute("UPDATE listens SET source = ?, audience = ? WHERE id = ?",
+                                (play["source"], play["audience"] or "me", r["id"]))
+
     def close(self) -> None:
         """Close the database."""
         self.db.close()
+
+    # ------------------------------------------------------------ guest mode
+    def set_guest_mode(self, hours: float | None) -> datetime | None:
+        """Turn guest mode on for a while, or off. Music played meanwhile doesn't train your taste.
+
+        It lasts until the time runs out or the program restarts.
+
+        Args:
+            hours: How long, up to 24; None or 0 turns it off.
+
+        Returns:
+            When it ends, or None if it is off.
+
+        Raises:
+            ValueError: More than 24 hours, or not a number.
+        """
+        if not hours:
+            self._guest_until = None
+            return None
+        hours = float(hours)
+        if not 0 < hours <= 24:
+            raise ValueError("guest mode lasts between a few minutes and 24 hours")
+        self._guest_until = self._now() + timedelta(hours=hours)
+        return self._guest_until
+
+    def guest_until(self) -> datetime | None:
+        """When guest mode ends, or None if it is off."""
+        if self._guest_until and self._now() >= self._guest_until:
+            self._guest_until = None
+        return self._guest_until
+
+    def _audience(self, wanted: str | None) -> str:
+        """Who music is for: ``"others"`` in guest mode, else ``wanted`` (default ``"me"``)."""
+        if self.guest_until():
+            return "others"
+        if wanted not in (None, *AUDIENCES):
+            raise ValueError(f"audience must be one of {', '.join(AUDIENCES)}")
+        return wanted or "me"
 
     # ------------------------------------------------------------ writes
     def start_request(self, prompt: str, model: str | None = None, weather: str | None = None,
@@ -183,7 +306,8 @@ class Memory:
         """
         self.db.execute("UPDATE requests SET reply = ?, cost_usd = ? WHERE id = ?", (reply, cost_usd, request_id))
 
-    def record_plays(self, items: list[MediaItem], request_id: int | None = None, source: str | None = None) -> None:
+    def record_plays(self, items: list[MediaItem], request_id: int | None = None, source: str | None = None,
+                     audience: str | None = None) -> None:
         """Record queued tracks.
 
         Args:
@@ -191,15 +315,26 @@ class Memory:
             request_id: Request that queued them.
             source: Who queued them: ``"dj"``, ``"curator"`` (quiz samples,
                 which the DJ may repeat) or ``"gui"``.
+            audience: ``"me"`` (default) or ``"others"`` (guests, a party);
+                always ``"others"`` in guest mode.
+
+        Raises:
+            ValueError: Unknown audience.
         """
         stamp = self._stamp()
+        audience = self._audience(audience)
         for item in items:
             self._insert("plays", {**stamp, "request_id": request_id, "ref": item.ref, "title": item.title,
-                                   "artist": item.artist, "album": item.album, "source": source})
+                                   "artist": item.artist, "album": item.album, "source": source,
+                                   "audience": audience})
 
     def record_listen(self, title: str, artist: str | None, outcome: str,
                       listened_s: int | None = None, duration_s: int | None = None) -> int:
         """Record what the watcher saw happen to a track.
+
+        The listen is linked to the play it came from (if an agent or the GUI
+        queued it), so quiz samples and music for others can be left out of
+        the taste.
 
         Args:
             title: Track title.
@@ -211,12 +346,19 @@ class Memory:
         Returns:
             The new row id.
         """
-        return self._insert("listens", {**self._stamp(), "title": title, "artist": artist, "outcome": outcome,
-                                        "listened_s": listened_s, "duration_s": duration_s})
+        stamp = self._stamp()
+        play = self._play_for(title, stamp["ts"])
+        if self.guest_until() or (play["audience"] if play else self.queue_audience) == "others":
+            audience = "others"
+        else:
+            audience = "me"
+        return self._insert("listens", {**stamp, "title": title, "artist": artist, "outcome": outcome,
+                                        "listened_s": listened_s, "duration_s": duration_s,
+                                        "source": play["source"] if play else None, "audience": audience})
 
     def record_feedback(self, sentiment: int, scope: str, title: str | None = None,
                         artist: str | None = None, note: str | None = None,
-                        request_id: int | None = None) -> int:
+                        request_id: int | None = None, source: str | None = None) -> int:
         """Record what the person said about a track, an artist or music in general.
 
         Args:
@@ -226,6 +368,8 @@ class Memory:
             artist: Artist; required for ``"artist"``.
             note: The person's own words; required for ``"general"``.
             request_id: Request it came from.
+            source: Where it was given: ``"dj"``, ``"curator"`` (a quiz
+                answer, which counts less) or ``"gui"``.
 
         Returns:
             The feedback id (``cli forget <id>`` deletes it).
@@ -236,7 +380,7 @@ class Memory:
         _check_feedback(sentiment, scope, title, artist, note)
         return self._insert("feedback", {**self._stamp(), "sentiment": sentiment, "scope": scope,
                                          "title": title, "artist": artist, "note": note,
-                                         "request_id": request_id})
+                                         "request_id": request_id, "source": source})
 
     def update_feedback(self, feedback_id: int, **changes: Any) -> dict[str, Any]:
         """Change some fields of one feedback entry (same rules as ``record_feedback``).
@@ -270,7 +414,8 @@ class Memory:
 
     # ------------------------------------------------------------ preferences
     def add_preference(self, kind: str, sentiment: int, subject: str, artist: str | None = None,
-                       part: str | None = None, note: str | None = None) -> int:
+                       part: str | None = None, note: str | None = None, frequency: str | None = None,
+                       context: str | None = None) -> int:
         """Record something the person stated outright. It never fades.
 
         Args:
@@ -281,6 +426,10 @@ class Memory:
             part: ``"morning"``, ``"afternoon"``, ``"evening"`` or ``"night"``
                 if it only applies then; None for any time.
             note: Extra nuance in the person's words.
+            frequency: For a love or a note: ``"regular"`` (default),
+                ``"sometimes"``, ``"rarely"`` or ``"on_request"``. Anything but
+                regular keeps it out of the liked lists the DJ leans on.
+            context: When it applies, in a few words (e.g. ``"at the gym"``).
 
         Returns:
             The preference id.
@@ -288,7 +437,7 @@ class Memory:
         Raises:
             ValueError: A field is missing or not one of the allowed values.
         """
-        row = _check_preference(kind, sentiment, subject, artist, part, note)
+        row = _check_preference(kind, sentiment, subject, artist, part, note, frequency, context)
         return self._insert("preferences", {"ts": self._stamp()["ts"], **row})
 
     def update_preference(self, pref_id: int, **changes: Any) -> dict[str, Any]:
@@ -296,7 +445,8 @@ class Memory:
 
         Args:
             pref_id: Id from ``preferences()``.
-            **changes: ``kind``, ``sentiment``, ``subject``, ``artist``, ``part`` and/or ``note``.
+            **changes: ``kind``, ``sentiment``, ``subject``, ``artist``, ``part``, ``note``,
+                ``frequency`` and/or ``context``.
 
         Returns:
             The preference after the change, with its ``text`` summary.
@@ -310,7 +460,8 @@ class Memory:
             raise KeyError(pref_id)
         current = dict(rows[0])
         current["part"] = current.pop("part_of_day")
-        merged = {k: changes.get(k, current[k]) for k in ("kind", "sentiment", "subject", "artist", "part", "note")}
+        merged = {k: changes.get(k, current[k])
+                  for k in ("kind", "sentiment", "subject", "artist", "part", "note", "frequency", "context")}
         row = _check_preference(**merged)
         self.db.execute(f"UPDATE preferences SET {', '.join(f'{c} = ?' for c in row)} WHERE id = ?",
                         [*row.values(), pref_id])
@@ -484,6 +635,170 @@ class Memory:
         """Notebook entries, newest first."""
         return [dict(r) for r in self._query("SELECT * FROM notebook ORDER BY ts DESC, id DESC LIMIT ?", (limit,))]
 
+    # ------------------------------------------------------------ findings
+    def add_finding(self, kind: str, subject: str, sentiment: int, statement: str,
+                    note: str | None = None) -> int:
+        """Start a tentative conclusion from quizzes; evidence is added with ``add_evidence``.
+
+        Args:
+            kind: ``"genre"``, ``"artist"``, ``"era"``, ``"mood"`` or ``"other"``.
+            subject: What it is about, e.g. ``"K-pop"``.
+            sentiment: 1 (likes it), -1 (dislikes it) or 0 (mixed).
+            statement: The conclusion in words, as the DJ will read it.
+            note: Anything else worth keeping.
+
+        Returns:
+            The finding's id.
+
+        Raises:
+            ValueError: A bad field, or an open finding about the same subject already exists.
+        """
+        row = _check_finding(kind, subject, sentiment, statement)
+        for f in self._query("SELECT id, subject FROM findings WHERE kind = ? AND status != 'dropped'", (kind,)):
+            if norm(f["subject"]) == norm(row["subject"]):
+                raise ValueError(f"There is already a finding about {f['subject']} (#{f['id']}); add evidence to it.")
+        now = self._stamp()["ts"]
+        return self._insert("findings", {**row, "ts": now, "updated": now, "status": "tentative",
+                                         "note": (note or "").strip() or None})
+
+    def add_evidence(self, finding_id: int, artist: str, reaction: int, title: str | None = None,
+                     salvage: bool = False, popularity: str | None = None, note: str | None = None) -> int:
+        """Record one sample behind a finding and how the person reacted to it.
+
+        Args:
+            finding_id: Id from ``add_finding``.
+            artist: The sample's artist.
+            reaction: 1 (liked it), 0 (it's OK) or -1 (not for them).
+            title: The sample's title.
+            salvage: It was chosen to give the subject a fair chance: a
+                different side of it than the samples so far.
+            popularity: ``"hit"``, ``"well known"``, ``"known"`` or ``"deep cut"``, if known.
+            note: Their words.
+
+        Returns:
+            The evidence id.
+
+        Raises:
+            KeyError: No such finding.
+            ValueError: The finding was dropped, or a bad field.
+        """
+        finding = self._finding_row(finding_id)
+        if finding["status"] == "dropped":
+            raise ValueError(f"Finding #{finding_id} was dropped; start a new one.")
+        if reaction not in (-1, 0, 1):
+            raise ValueError("reaction must be -1, 0 or 1")
+        _check_evidence(artist)
+        eid = self._insert("finding_evidence", {
+            "ts": self._stamp()["ts"], "finding_id": finding_id, "title": (title or "").strip() or None,
+            "artist": artist.strip(), "reaction": reaction, "salvage": int(bool(salvage)),
+            "popularity": popularity, "note": (note or "").strip() or None})
+        self.db.execute("UPDATE findings SET updated = ? WHERE id = ?", (self._stamp()["ts"], finding_id))
+        return eid
+
+    def check_finding(self, finding_id: int) -> dict[str, Any]:
+        """Is there enough evidence to confirm a finding? The same bar for every subject.
+
+        Returns:
+            ``ready`` (bool), ``missing`` (what's still needed, in words) and
+            the counts behind it: ``samples``, ``artists``, ``agreeing``,
+            ``salvage_tries``, ``hits``.
+
+        Raises:
+            KeyError: No such finding.
+        """
+        return self._evidence_check(self._finding_row(finding_id), self.tuning())
+
+    def confirm_finding(self, finding_id: int) -> dict[str, Any]:
+        """Mark a finding as confirmed, if its evidence is enough.
+
+        Returns:
+            The finding, with its evidence check.
+
+        Raises:
+            KeyError: No such finding.
+            ValueError: Not enough evidence yet (the message says what's missing).
+        """
+        self.update_finding(finding_id, status="confirmed")
+        return self.finding(finding_id)
+
+    def update_finding(self, finding_id: int, **changes: Any) -> dict[str, Any]:
+        """Change a finding's ``statement``, ``subject``, ``sentiment``, ``status`` or ``note``.
+
+        Raises:
+            KeyError: No such finding.
+            ValueError: An unknown field, a bad value, or confirming without enough evidence.
+        """
+        bad = set(changes) - {"statement", "subject", "sentiment", "status", "note"}
+        if bad:
+            raise ValueError(f"Can't change {', '.join(sorted(bad))} of a finding.")
+        self.db.update_row("findings", finding_id, {**changes, "updated": self._stamp()["ts"]})
+        return self.finding(finding_id)
+
+    def remove_finding(self, finding_id: int) -> bool:
+        """Delete a finding and its evidence.
+
+        Returns:
+            True if one was deleted.
+        """
+        return self.db.execute("DELETE FROM findings WHERE id = ?", (finding_id,)) > 0
+
+    def finding(self, finding_id: int) -> dict[str, Any]:
+        """One finding with its evidence and its check.
+
+        Raises:
+            KeyError: No such finding.
+        """
+        f = self._finding_row(finding_id)
+        evidence = [dict(e) for e in self._query("SELECT * FROM finding_evidence WHERE finding_id = ? ORDER BY id",
+                                                 (finding_id,))]
+        return {**f, "evidence": evidence, "check": self._evidence_check(f, self.tuning())}
+
+    def findings(self, include_dropped: bool = False) -> list[dict[str, Any]]:
+        """All findings, newest first, each with its evidence and check."""
+        where = "" if include_dropped else "WHERE status != 'dropped'"
+        return [self.finding(r["id"]) for r in self._query(f"SELECT id FROM findings {where} ORDER BY id DESC")]
+
+    def _finding_row(self, finding_id: int) -> dict[str, Any]:
+        """The ``findings`` row as a dict; KeyError if there's none."""
+        rows = self._query("SELECT * FROM findings WHERE id = ?", (finding_id,))
+        if not rows:
+            raise KeyError(finding_id)
+        return dict(rows[0])
+
+    def _evidence_check(self, f: dict[str, Any], t: dict[str, float]) -> dict[str, Any]:
+        """Count a finding's evidence against the bar in ``scoring.TUNING``."""
+        rows = self._query("SELECT * FROM finding_evidence WHERE finding_id = ?", (f["id"],))
+        samples = len(rows)
+        if f["kind"] == "artist":   # about one artist: different songs are what count
+            distinct = len({norm(r["title"]) for r in rows if r["title"]})
+        else:
+            distinct = len({norm(r["artist"]) for r in rows})
+        agreeing = sum(1 for r in rows if r["reaction"] == f["sentiment"])
+        salvage = sum(1 for r in rows if r["salvage"])
+        hits = sum(1 for r in rows if r["popularity"] == "hit")
+        missing = []
+        if samples < t["finding_min_samples"]:
+            missing.append(f"{int(t['finding_min_samples']) - samples} more sample(s)")
+        what = "different songs" if f["kind"] == "artist" else "different artists"
+        if distinct < t["finding_min_artists"]:
+            missing.append(f"samples from {int(t['finding_min_artists']) - distinct} more {what}")
+        if samples and hits == samples:
+            missing.append("a sample that isn't a famous hit (all so far were hits)")
+        if f["sentiment"] != 0 and samples and agreeing / samples < t["finding_min_agreement"]:
+            missing.append(f"more agreement: only {agreeing} of {samples} reactions fit the conclusion")
+        if f["sentiment"] < 0 and not salvage:
+            missing.append("a salvage try: a sample from another side of it, to give it a fair chance")
+        return {"ready": not missing, "missing": missing, "samples": samples, "artists": distinct,
+                "agreeing": agreeing, "salvage_tries": salvage, "hits": hits}
+
+    def _check_finding_row(self, r: dict[str, Any]) -> None:
+        """Rules for a ``findings`` row, for the methods above and the GUI's Database page alike."""
+        _check_finding(r["kind"], r["subject"], r["sentiment"], r["statement"], r["status"])
+        if r["status"] == "confirmed":
+            check = self._evidence_check(r, self.tuning())
+            if not check["ready"]:
+                raise ValueError(f"Not enough evidence to confirm yet: {'; '.join(check['missing'])}.")
+
     # ------------------------------------------------------------ tuning
     def tuning(self) -> dict[str, float]:
         """The scoring numbers in use: the defaults from ``scoring.TUNING``, with your changes."""
@@ -551,20 +866,25 @@ class Memory:
 
         Returns:
             ``listens`` (newest first: date, part of day, outcome, track, how
-            much was heard), ``by_artist`` (completed/skipped counts, most
-            skipped first) and ``dj_requests`` (what you asked the DJ for).
+            much was heard, and ``context`` "quiz sample" or "for others" when
+            it doesn't count towards taste), ``by_artist`` (completed/skipped
+            counts of your own listening, most skipped first) and
+            ``dj_requests`` (what you asked the DJ for).
         """
         since = (self._now() - timedelta(days=days)).isoformat(timespec="seconds")
         rows = [r for r in self._query("SELECT * FROM listens WHERE ts >= ? ORDER BY ts DESC, id DESC", (since,))
                 if artist is None or norm(r["artist"]) == norm(artist)]
         counts: dict[str, dict[str, Any]] = {}
         for r in rows:
-            c = counts.setdefault(norm(r["artist"]), {"artist": r["artist"] or "?", "completed": 0, "skipped": 0})
-            c[r["outcome"]] += 1
-        listens = [{"date": r["ts"][:16].replace("T", " "), "part_of_day": r["part_of_day"], "outcome": r["outcome"],
-                    "track": f"{r['title']} - {r['artist'] or '?'}",
-                    "heard": f"{round(100 * r['listened_s'] / r['duration_s'])}%"
-                    if r["listened_s"] is not None and r["duration_s"] else None}
+            if _listen_context(r) is None:
+                c = counts.setdefault(norm(r["artist"]), {"artist": r["artist"] or "?", "completed": 0, "skipped": 0})
+                c[r["outcome"]] += 1
+        listens = [{k: v for k, v in {
+                       "date": r["ts"][:16].replace("T", " "), "part_of_day": r["part_of_day"],
+                       "outcome": r["outcome"], "track": f"{r['title']} - {r['artist'] or '?'}",
+                       "heard": f"{round(100 * r['listened_s'] / r['duration_s'])}%"
+                       if r["listened_s"] is not None and r["duration_s"] else None,
+                       "context": _listen_context(r)}.items() if v is not None}
                    for r in rows[:limit]]
         requests = [{"date": r["ts"][:16].replace("T", " "), "asked": r["prompt"]} for r in self._query(
             "SELECT ts, prompt FROM requests WHERE ts >= ? AND COALESCE(agent, 'dj') = 'dj' "
@@ -587,11 +907,23 @@ class Memory:
         t = self.tuning()
         sc = self._scores(part, t)
         artists, tracks = list(sc.artists.values()), list(sc.tracks.values())
+        # Loves stated as "sometimes", "rarely" or "only when asked" stay out of the liked lists (their
+        # preference tells the DJ how often), whatever likes and listening added up to.
+        liked_artists = [e for e in artists if norm(e.name) not in sc.occasional]
+        liked_tracks_pool = [e for e in tracks if track_key(e.title, e.artist) not in sc.occasional
+                             and norm(e.artist) not in sc.occasional]
 
         avoid_tracks = _names(tracks, t["avoid_track_at"], liked=False, limit=30)
         for e in tracks:
             if e.skips >= t["skips_to_avoid"] and e.name not in avoid_tracks:
                 avoid_tracks.append(e.name)
+        played_often, rest_artists, often_keys = self._played_lately(t)
+        findings = self.findings()
+        # A liked quiz sample shouldn't become a regular: only what you liked outside quizzes counts here.
+        # Favourites heard often lately rest for a while (they're in played_often_lately instead).
+        liked_tracks = sorted((e for e in liked_tracks_pool if _without_quiz_likes(e) >= t["liked_track_at"]
+                               and (core_title(e.title), norm(e.artist)) not in often_keys),
+                              key=lambda e: -_without_quiz_likes(e))
 
         # Your notes: from feedback, and notebook entries marked for the DJ. Newest first.
         dated = [(r["ts"], f"{'+' if r['sentiment'] > 0 else '-' if r['sentiment'] < 0 else '~'} {r['note']} "
@@ -614,20 +946,51 @@ class Memory:
 
         profile = {
             "preferences": [describe_preference(r) for r in sc.preferences],
-            "liked_artists": _names(artists, t["liked_artist_at"], liked=True, limit=15),
+            "liked_artists": _names(liked_artists, t["liked_artist_at"], liked=True, limit=15),
             "avoid_artists": _names(artists, t["avoid_artist_at"], liked=False, limit=15),
-            "liked_tracks": _names(tracks, t["liked_track_at"], liked=True, limit=20),
+            "liked_tracks": [e.name for e in liked_tracks[:20]],
+            "findings": [f["statement"] for f in findings if f["status"] == "confirmed"],
+            "tentative_findings": [f"{f['statement']} (tentative: {f['check']['samples']} sample(s) from "
+                                   f"{f['check']['artists']} {'song' if f['kind'] == 'artist' else 'artist'}(s))"
+                                   for f in findings if f["status"] == "tentative"],
             "avoid_tracks": avoid_tracks[:30],
             "notes": notes,
             f"played_in_last_{recent_hours}h": recent,
+            "played_often_lately": played_often,
+            "artists_to_rest": rest_artists,
             "history": {"tracks_played": totals["plays"], "feedback_given": totals["feedback"],
                         "skips_seen": totals["skips"]},
         }
         if part:
-            favourites = sorted((e for e in artists if e.part_of_day_score >= t["liked_artist_at"]),
+            # A favourite for this time of day: stated so, or liked at this time on several different days.
+            favourites = sorted((e for e in liked_artists if e.part_of_day_stated or (
+                                    e.part_of_day_score >= t["liked_artist_at"]
+                                    and len(e.part_of_day_days) >= t["part_of_day_min_days"])),
                                 key=lambda e: -e.part_of_day_score)
             profile[f"liked_in_the_{part}"] = [e.name for e in favourites[:8]]
         return {k: v for k, v in profile.items() if v not in ([], None)}
+
+    def _played_lately(self, t: dict[str, float]) -> tuple[list[str], list[str], set[tuple[str, str]]]:
+        """What the DJ has been repeating within the freshness window (quiz samples aside).
+
+        Returns:
+            ``(tracks played twice or more, artists played a lot, keys of those tracks)``,
+            each list most played first, with counts, e.g. ``"Ho Hey - The Lumineers (7x)"``.
+        """
+        since = (self._now() - timedelta(days=t["freshness_days"])).isoformat(timespec="seconds")
+        tracks: dict[tuple[str, str], list] = {}
+        artists: dict[str, list] = {}
+        for r in self._query("SELECT title, artist FROM plays WHERE ts >= ? AND COALESCE(source, '') != 'curator' "
+                             "ORDER BY id DESC", (since,)):
+            key = (core_title(r["title"]), norm(r["artist"]))
+            tracks.setdefault(key, [f"{r['title']} - {r['artist'] or '?'}", 0])[1] += 1
+            if r["artist"]:
+                artists.setdefault(norm(r["artist"]), [r["artist"], 0])[1] += 1
+        often = sorted(((k, v) for k, v in tracks.items() if v[1] >= 2), key=lambda kv: -kv[1][1])
+        busy = sorted((v for v in artists.values() if v[1] >= t["overplayed_artist_plays"]), key=lambda v: -v[1])
+        return ([f"{name} ({n}x)" for _, (name, n) in often[:30]],
+                [f"{name} ({n} plays)" for name, n in busy[:12]],
+                {k for k, _ in often})
 
     def affinities(self, limit: int = 50) -> dict[str, list[dict[str, Any]]]:
         """Return the scores behind the taste profile, with where each came from.
@@ -649,7 +1012,7 @@ class Memory:
                  "parts": {k: round(v, 2) for k, v in e.parts.items()}, "adjustment": e.adjustment,
                  "artist": e.artist}
             if track:
-                d.update(title=e.title, skips=e.skips)
+                d.update(title=e.title, skips=e.skip_count)
             return d
 
         artists = sorted((entry(e, False) for e in sc.artists.values() if e.parts), key=lambda d: -d["score"])
@@ -681,43 +1044,84 @@ class Memory:
                       track_reset.get(track_key(title, row["artist"])) if title else None]
             return any(c and row["ts"] <= c for c in cutoff)
 
-        def add(source: str, row: Any, title: str | None, value: float) -> None:
-            if row["artist"]:
-                sc.artist(row["artist"]).add(source, value, row["part_of_day"], part)
-            if title:
-                sc.track(title, row["artist"]).add(source, value)
-
         # Stated preferences: full weight, never fading. One limited to a part of
         # the day only counts at that time (as a favourite); "avoid, but only
         # then" ones are left to Claude, in their own words.
+        # A love that should come up only sometimes counts partly; rarely / only
+        # when asked not at all (``Scores.occasional`` keeps it out of the liked lists).
         sc.preferences = self._query("SELECT * FROM preferences ORDER BY id DESC")
-        w = t["preference"]
+        share = {"regular": 1.0, "sometimes": t["preference_sometimes"], "rarely": 0.0, "on_request": 0.0}
         for r in sc.preferences:
             if r["sentiment"] == 0 or r["kind"] not in ("artist", "track"):
                 continue
+            frequency = r["frequency"] or "regular"
+            if r["sentiment"] > 0 and frequency != "regular":
+                sc.occasional.add(norm(r["subject"]) if r["kind"] == "artist" else track_key(r["subject"], r["artist"]))
+            w = t["preference"] * share.get(frequency, 1.0)
             if r["part_of_day"] is None:
                 if r["kind"] == "artist":
                     sc.artist(r["subject"]).add("stated", w * r["sentiment"])
                 else:  # a loved track says little about the artist's other songs
                     sc.track(r["subject"], r["artist"]).add("stated", w * r["sentiment"])
-            elif r["kind"] == "artist" and r["part_of_day"] == part and r["sentiment"] > 0:
-                sc.artist(r["subject"]).part_of_day_score += w
+            elif r["kind"] == "artist" and r["part_of_day"] == part and r["sentiment"] > 0 and frequency == "regular":
+                e = sc.artist(r["subject"])
+                e.part_of_day_score += w
+                e.part_of_day_stated = True
 
+        # Feedback. Quiz answers (given to the curator) count less, and say
+        # nothing about the time of day: a quiz happens whenever you have time.
         half_life = t["half_life_days"]
         weights = {"artist": t["artist_feedback"], "track": t["track_feedback"]}
-        for r in self._query("SELECT * FROM feedback WHERE scope IN ('track', 'artist') AND sentiment != 0"):
+        for r in self._query("SELECT f.*, COALESCE(f.source, q.agent) AS origin FROM feedback f "
+                             "LEFT JOIN requests q ON q.id = f.request_id "
+                             "WHERE f.scope IN ('track', 'artist') AND f.sentiment != 0"):
             title = r["title"] if r["scope"] == "track" else None
             if reset_hides(r, title):
                 continue
-            add("feedback", r, title, weights[r["scope"]] * r["sentiment"] * self._weight(r["ts"], half_life, now))
+            quiz = r["origin"] == "curator"
+            source = "quiz" if quiz else "feedback"
+            signed = r["sentiment"] * self._weight(r["ts"], half_life, now)
+            if r["artist"]:
+                # One quiz sample says less about the artist's other songs than everyday likes do.
+                weight = t["quiz_feedback"] if quiz and title else weights[r["scope"]]
+                sc.artist(r["artist"]).add(source, weight * signed, None if quiz else r["part_of_day"], part,
+                                           str(r["ts"])[:10])
+            if title:
+                sc.track(title, r["artist"]).add(source, weights["track"] * signed)
 
-        for r in self._query("SELECT * FROM listens"):
-            if reset_hides(r, r["title"]):
+        # Listening: only your own (not quiz samples, not music for others), and
+        # mostly about the track. Skips fade faster than what you say.
+        skip_half_life = t["skip_half_life_days"]
+        for r in self._query("SELECT * FROM listens WHERE COALESCE(source, '') != 'curator' "
+                             "AND COALESCE(audience, 'me') != 'others'"):
+            if not r["title"] or reset_hides(r, r["title"]):
                 continue
-            add("listening", r, r["title"], t[r["outcome"]] * self._weight(r["ts"], half_life, now))
-            if r["outcome"] == "skipped" and r["title"]:
-                sc.track(r["title"], r["artist"]).skips += 1
+            track = sc.track(r["title"], r["artist"])
+            if r["outcome"] == "completed":
+                if t["completed"]:
+                    track.add("listening", t["completed"] * self._weight(r["ts"], half_life, now))
+                continue
+            faded = self._weight(r["ts"], skip_half_life, now)
+            track.add("listening", t["skipped"] * faded)
+            track.skips += faded
+            track.skip_count += 1
+            if r["artist"] and t["skipped_artist"]:
+                sc.artist(r["artist"]).add("listening", t["skipped_artist"] * faded)
         return sc
+
+
+def _listen_context(r: Any) -> str | None:
+    """Why a listen doesn't count towards taste ("quiz sample", "for others"), or None if it does."""
+    if r["source"] == "curator":
+        return "quiz sample"
+    if r["audience"] == "others":
+        return "for others"
+    return None
+
+
+def _without_quiz_likes(e: Entry) -> float:
+    """An entry's score minus what liked quiz answers added (quiz dislikes still count)."""
+    return e.score - max(0.0, e.parts.get("quiz", 0.0))
 
 
 def _names(entries: list[Entry], at: float, liked: bool, limit: int) -> list[str]:
@@ -731,7 +1135,9 @@ def describe_preference(p: Any) -> str:
     """Put a preference in plain words, e.g. ``"avoid genre: reggaeton (in the morning only)"``.
 
     A time of day narrows an *avoid* ("only then") but only highlights a
-    *love* ("especially then"); the wording makes that clear to Claude.
+    *love* ("especially then"); the wording makes that clear to Claude. How
+    often and when come next, e.g. ``"love artist: The Hu (rarely: an
+    occasional surprise at most, never a regular; when: at the gym)"``.
 
     Args:
         p: A ``preferences`` row (sqlite Row or dict).
@@ -748,6 +1154,11 @@ def describe_preference(p: Any) -> str:
     if p["part_of_day"]:
         text += {1: f" (especially in the {p['part_of_day']})",
                  -1: f" (in the {p['part_of_day']} only)"}.get(p["sentiment"], f" (in the {p['part_of_day']})")
+    how = [FREQUENCY_WORDS[f] for f in [_get(p, "frequency")] if f in FREQUENCY_WORDS]
+    if _get(p, "context"):
+        how.append(f"when: {_get(p, 'context')}")
+    if how:
+        text += f" ({'; '.join(how)})"
     if p["note"]:
         text += f" - {p['note']}"
     return text
@@ -786,10 +1197,24 @@ def _check_feedback(sentiment: int, scope: str, title: str | None, artist: str |
         raise ValueError("general feedback needs a note")
 
 
+def _get(row: Any, key: str) -> Any:
+    """``row[key]``, or None for a row from before that column existed."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def _check_preference(kind: str, sentiment: int, subject: str, artist: str | None = None,
-                      part: str | None = None, note: str | None = None) -> dict[str, Any]:
+                      part: str | None = None, note: str | None = None, frequency: str | None = None,
+                      context: str | None = None) -> dict[str, Any]:
     """Validate and tidy a preference; return it as a row for the ``preferences`` table."""
     subject = (subject or "").strip()
+    frequency = (frequency or "").strip() or None
+    if frequency not in (None, *FREQUENCIES):
+        raise ValueError(f"how often must be one of {', '.join(FREQUENCIES)}")
+    if frequency not in (None, "regular") and sentiment == -1:
+        raise ValueError("how often applies to a love or a note, not to an avoid (an avoid is never played)")
     if kind not in PREFERENCE_KINDS:
         raise ValueError(f"kind must be one of {', '.join(PREFERENCE_KINDS)}")
     if sentiment not in (-1, 0, 1):
@@ -801,7 +1226,29 @@ def _check_preference(kind: str, sentiment: int, subject: str, artist: str | Non
     artist = (artist or "").strip() or None
     return {"kind": kind, "sentiment": sentiment, "subject": subject,
             "artist": artist if kind == "track" else None,
-            "part_of_day": part, "note": (note or "").strip() or None}
+            "part_of_day": part, "note": (note or "").strip() or None,
+            "frequency": None if frequency == "regular" else frequency,
+            "context": (context or "").strip() or None}
+
+
+def _check_finding(kind: str, subject: str, sentiment: int, statement: str,
+                   status: str = "tentative") -> dict[str, Any]:
+    """Validate and tidy a finding's fields; return them as a row."""
+    if kind not in FINDING_KINDS:
+        raise ValueError(f"a finding is about one of: {', '.join(FINDING_KINDS)}")
+    if sentiment not in (-1, 0, 1):
+        raise ValueError("sentiment must be -1, 0 or 1")
+    if status not in FINDING_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(FINDING_STATUSES)}")
+    if not (subject or "").strip() or not (statement or "").strip():
+        raise ValueError("a finding needs a subject and a statement")
+    return {"kind": kind, "subject": subject.strip(), "sentiment": sentiment, "statement": statement.strip()}
+
+
+def _check_evidence(artist: str | None) -> None:
+    """Raise ValueError unless a piece of evidence names its artist."""
+    if not (artist or "").strip():
+        raise ValueError("a sample needs its artist")
 
 
 def _check_note(author: str, text: str | None) -> None:

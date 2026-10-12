@@ -12,6 +12,7 @@ from music_agent.players.balance import SpeakerBalance
 from music_agent.players.sonos import SonosPlayer
 from music_agent.providers.base import MusicProvider
 from music_agent.providers.sonos_service import SonosServiceProvider
+from music_agent.trackinfo import TrackInfoService
 from music_agent.weather import WeatherService
 
 
@@ -27,6 +28,8 @@ class App:
         weather: Local weather, or None.
         watcher: Learns from skips and finished tracks; None without memory.
         playlists: Saved playlists (in the memory's database); None without memory.
+        trackinfo: Looks up track qualities online for the curator (cached in
+            the memory's database); None without memory.
     """
 
     config: Config
@@ -36,6 +39,7 @@ class App:
     weather: WeatherService | None = None
     watcher: PlaybackWatcher | None = None
     playlists: PlaylistStore | None = None
+    trackinfo: TrackInfoService | None = None
 
 
 def build(config: Config | None = None, with_memory: bool = True) -> App:
@@ -61,5 +65,6 @@ def build(config: Config | None = None, with_memory: bool = True) -> App:
         app.memory = Memory(PROJECT_ROOT / config.memory.path, config.memory.half_life_days)
         app.watcher = PlaybackWatcher(player, app.memory, config.memory.watch_interval_s)
         app.playlists = PlaylistStore(app.memory.db)
+        app.trackinfo = TrackInfoService(app.memory.db)
         player.balance = SpeakerBalance(app.memory.db)   # remember per-room volumes across restarts
     return app

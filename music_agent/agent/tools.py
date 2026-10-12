@@ -105,6 +105,9 @@ class MusicTools:
                 ctx["weather"] = weather.as_dict()
         if self.memory:
             ctx["taste"] = await asyncio.to_thread(self.memory.taste_profile, part_of_day(now.hour))
+            guest_until = self.memory.guest_until()
+            if guest_until:
+                ctx["guest_mode"] = f"on until {guest_until:%H:%M}: music is for guests and doesn't train the taste"
         if self.playlists:
             saved = await asyncio.to_thread(self.playlists.list)
             if saved:
@@ -145,7 +148,7 @@ class MusicTools:
 
     # ------------------------------------------------------------ play
     async def play_tracks(self, tracks: list[dict[str, str]], mode: str = "replace",
-                          rooms: str | list[str] | None = None) -> dict[str, Any]:
+                          rooms: str | list[str] | None = None, for_others: bool = False) -> dict[str, Any]:
         """Look up each requested song, then queue the ones found, in order.
 
         Lookups run in parallel (``SEARCH_CONCURRENCY`` at a time); duplicates
@@ -155,6 +158,8 @@ class MusicTools:
             tracks: ``{"title", "artist", "album"?}`` dicts.
             mode: ``"replace"``, ``"append"`` or ``"next"``.
             rooms: Room names, or None for the default.
+            for_others: The music is for other people (guests, a party), so
+                listening to it doesn't train the owner's taste.
 
         Returns:
             What was queued, total duration, and for each miss why it was
@@ -175,7 +180,7 @@ class MusicTools:
             return {"queued": 0, "not_found": not_found,
                     "note": "Nothing was found, so nothing changed. Pick other tracks, "
                             "preferably from catalogue_tracks_by_artist."}
-        return {**await self._queue(items, mode, rooms), "not_found": not_found}
+        return {**await self._queue(items, mode, rooms, for_others), "not_found": not_found}
 
     async def lookup_tracks(self, tracks: list[dict[str, str]]) -> tuple[list[MediaItem], list[dict[str, Any]]]:
         """Find requested songs in the catalogue (``SEARCH_CONCURRENCY`` lookups at a time).
@@ -212,15 +217,16 @@ class MusicTools:
 
         return list(await asyncio.gather(*(lookup(t) for t in tracks)))
 
-    async def _queue(self, items: list[MediaItem], mode: str, rooms: str | list[str] | None) -> dict[str, Any]:
-        """Queue found tracks, record them as plays, and summarise what happened."""
-        if mode == "replace" and self.watcher:
-            self.watcher.ignore_next_change()
+    async def _queue(self, items: list[MediaItem], mode: str, rooms: str | list[str] | None,
+                     for_others: bool = False) -> dict[str, Any]:
+        """Queue found tracks, record them as plays (and for whom), and summarise what happened."""
+        self._starting(mode, for_others)
         result = await self._run(self.player.play, items, rooms, mode)
         if self.memory and result.queued:
-            await asyncio.to_thread(self.memory.record_plays, result.queued, self.request_id, self.source)
+            await asyncio.to_thread(self.memory.record_plays, result.queued, self.request_id, self.source,
+                                    "others" if for_others else "me")
         total = sum(i.duration_s or 0 for i in result.queued)
-        return {
+        out = {
             "queued": len(result.queued),
             "mode": mode,
             "total_duration": format_minutes(round(total / 60)) if total else "unknown",
@@ -229,9 +235,21 @@ class MusicTools:
             "tracks": [i.label() for i in result.queued],
             "failed_to_queue": [f"{i.label()}: {err}" for i, err in result.failed],
         }
+        if for_others or (self.memory and self.memory.guest_until()):
+            out["for_others"] = True
+        return out
+
+    def _starting(self, mode: str, for_others: bool) -> None:
+        """Before queueing: a new queue isn't a skip of the old one, and remember who it's for."""
+        if mode != "replace":
+            return
+        if self.watcher:
+            self.watcher.ignore_next_change()
+        if self.memory:
+            self.memory.queue_audience = "others" if for_others else "me"
 
     async def play_playlist(self, name: str | int, mode: str = "replace", rooms: str | list[str] | None = None,
-                            shuffle: bool = False) -> dict[str, Any]:
+                            shuffle: bool = False, for_others: bool = False) -> dict[str, Any]:
         """Play a saved playlist. Its tracks are already known, so this needs no searching.
 
         Tracks saved under another music service (after switching service)
@@ -242,6 +260,7 @@ class MusicTools:
             mode: ``"replace"``, ``"append"`` or ``"next"``.
             rooms: Room names, or None for the default.
             shuffle: Play the tracks in random order.
+            for_others: The music is for other people; see ``play_tracks``.
 
         Returns:
             What was queued (the first few titles) and the total length.
@@ -280,7 +299,7 @@ class MusicTools:
         if not items:
             raise ToolError(f"None of the tracks in '{playlist['name']}' could be found in the catalogue.")
 
-        out = await self._queue(items, mode, rooms)
+        out = await self._queue(items, mode, rooms, for_others)
         shown = 8
         more = len(out["tracks"]) - shown
         return {"playlist": playlist["name"], **out, "shuffled": shuffle,
@@ -303,13 +322,14 @@ class MusicTools:
         return playlist
 
     async def play_item(self, ref: str, mode: str = "replace",
-                        rooms: str | list[str] | None = None) -> dict[str, Any]:
+                        rooms: str | list[str] | None = None, for_others: bool = False) -> dict[str, Any]:
         """Play a search result (album, playlist or track) by its ref.
 
         Args:
             ref: A ref from ``search_music``.
             mode: ``"replace"``, ``"append"`` or ``"next"``.
             rooms: Room names, or None for the default.
+            for_others: The music is for other people; see ``play_tracks``.
 
         Returns:
             What was queued and where.
@@ -324,8 +344,7 @@ class MusicTools:
         if provider != self.provider.name:
             raise ToolError(f"ref is for provider '{provider}', current provider is '{self.provider.name}'")
         item = MediaItem(provider, kind, item_id, title=ref)
-        if mode == "replace" and self.watcher:
-            self.watcher.ignore_next_change()
+        self._starting(mode, for_others)
         result = await self._run(self.player.play, [item], rooms, mode)
         return {"queued": ref, "kind": kind, "mode": mode, "rooms": result.rooms, "volume": result.volume}
 
@@ -440,7 +459,7 @@ class MusicTools:
             raise ToolError("about must be current_track, track, artist or general")
         try:
             fid = await asyncio.to_thread(self.memory.record_feedback, SENTIMENT[sentiment], about,
-                                          title, artist, note, self.request_id)
+                                          title, artist, note, self.request_id, self.source)
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
         target = {"track": f"{title} - {artist}", "artist": artist, "general": note}[about]

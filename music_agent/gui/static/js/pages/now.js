@@ -46,6 +46,7 @@ export default {
     const volumeValue = h("span", { class: "value" });
     const queueList = h("ol", { class: "queue" });
     const speakers = speakerControls();
+    const guests = guestMode();
     const dj = chatPanel({
       conversation: "dj",
       placeholder: "Ask the DJ…  e.g. “something mellow for cooking”",
@@ -76,6 +77,7 @@ export default {
             dj.messages,
             dj.composer)),
         h("aside", { class: "side" },
+          guests.el,
           speakers.el,
           h("div", { class: "card" }, h("h2", {}, "Queue"), queueList))));
 
@@ -86,6 +88,7 @@ export default {
         sampledAt = performance.now();
         render();
         speakers.load();
+        guests.load();
       } catch (err) {
         np = null;
         title.textContent = "Can't reach the speakers";
@@ -211,6 +214,43 @@ export default {
     };
   },
 };
+
+/**
+ * Guest mode: while it's on, everything that plays is "for others" and doesn't train your taste
+ * (the DJ also marks requests like "for the party" by itself). Returns { el, load }.
+ */
+function guestMode() {
+  const status = h("div", { class: "faint small" });
+  const button = h("button", { class: "btn small", onclick: toggle }, "Guests over");
+  const el = h("div", { class: "card" },
+    h("div", { class: "dj-chat-head" }, h("h2", {}, "Guest mode"), button),
+    status);
+  let on = false;
+
+  function show(data) {
+    on = data.on;
+    button.textContent = on ? "Turn off" : "Guests over";
+    button.classList.toggle("primary", on);
+    status.textContent = on
+      ? `On until ${data.until.slice(11, 16)}: what plays now doesn't shape your taste.`
+      : "Off: what plays is learned from as your own listening.";
+  }
+
+  async function load() {
+    const data = await api("/guest").catch(() => null);
+    if (data) show(data);
+  }
+
+  async function toggle() {
+    const data = await attempt(() => api("/guest", { method: "POST", body: { hours: on ? null : 4 } }));
+    if (data) {
+      show(data);
+      toast(data.on ? "Guest mode on for 4 hours" : "Guest mode off");
+    }
+  }
+
+  return { el, load };
+}
 
 /**
  * One volume slider per speaker. Moving one saves the balance between speakers, so the

@@ -2,7 +2,7 @@
 
 import { api } from "../api.js";
 import { ago, attempt, h, icon, toast } from "../ui.js";
-import { PARTS, SENTIMENT_OF, SENTIMENTS, select } from "./common.js";
+import { FREQUENCIES, PARTS, SENTIMENT_OF, SENTIMENTS, select } from "./common.js";
 
 const KINDS = { artist: "Artist", track: "Track", genre: "Genre / style", rule: "Rule" };
 const PLACEHOLDERS = {
@@ -14,6 +14,8 @@ export function preferencesEditor(prefs, reload) {
   const kind = select(KINDS, "artist");
   const sentiment = select(SENTIMENTS, "like");
   const part = select(PARTS, "");
+  const frequency = select(FREQUENCIES, "regular", { title: "How often a love should come up" });
+  const context = h("input", { class: "input", placeholder: "When (optional), e.g. at the gym", maxlength: 200 });
   const subject = h("input", { class: "input", required: true, maxlength: 300 });
   const artist = h("input", { class: "input", placeholder: "Artist", maxlength: 300 });
   const note = h("input", { class: "input", placeholder: "Note (optional)", maxlength: 500 });
@@ -22,8 +24,10 @@ export function preferencesEditor(prefs, reload) {
   const sync = () => {
     subject.placeholder = PLACEHOLDERS[kind.value];
     artist.hidden = kind.value !== "track";
+    frequency.hidden = sentiment.value === "dislike";   // an avoid is never played, so "how often" doesn't apply
   };
   kind.onchange = sync;
+  sentiment.onchange = sync;
   sync();
 
   function fill(p) {
@@ -34,6 +38,8 @@ export function preferencesEditor(prefs, reload) {
     subject.value = p ? p.subject : "";
     artist.value = p ? p.artist || "" : "";
     note.value = p ? p.note || "" : "";
+    frequency.value = p ? p.frequency || "regular" : "regular";
+    context.value = p ? p.context || "" : "";
     submit.replaceChildren(icon(p ? "edit" : "plus"), p ? "Save" : "Add");
     cancel.hidden = !p;
     sync();
@@ -46,6 +52,8 @@ export function preferencesEditor(prefs, reload) {
       kind: kind.value, sentiment: sentiment.value, subject: subject.value.trim(),
       artist: kind.value === "track" ? artist.value.trim() || null : null,
       part_of_day: part.value || null, note: note.value.trim() || null,
+      frequency: sentiment.value === "dislike" ? null : frequency.value,
+      context: context.value.trim() || null,
     };
     const out = await attempt(() => editing
       ? api(`/preferences/${editing}`, { method: "PUT", body })
@@ -69,7 +77,8 @@ export function preferencesEditor(prefs, reload) {
     : h("p", { class: "empty" }, "Nothing stated yet. Add one here, or tell the curator on the Chat page (“I'm done with Coldplay”).");
 
   return h("div", {},
-    h("form", { class: "pref-form", onsubmit: save }, sentiment, kind, subject, artist, part, note, submit, cancel),
+    h("form", { class: "pref-form", onsubmit: save },
+      sentiment, kind, subject, artist, part, frequency, context, note, submit, cancel),
     rows);
 }
 

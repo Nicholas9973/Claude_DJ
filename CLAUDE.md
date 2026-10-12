@@ -47,7 +47,8 @@ Stop a running bot before changing code it imports, then restart it.
 ```
 music_agent/
   agent/tools.py        the DJ's actions (plain async Python, returns dicts); also shared track lookup
-  agent/curator_tools.py  the curator's extra actions: preferences, score nudges, notebook, history, playlists
+  agent/curator_tools.py  the curator's extra actions: preferences, findings + quiz answers, track lookups,
+                        score nudges, notebook, history, playlists
   agent/prompt.py       both agents' instructions in plain English (DJ and CURATOR prompts)
   agent/server.py       tool names, descriptions, JSON schemas, and ROLE_TOOLS (which tools each role gets)
   agent/session.py      SDK options (lockdown) + conversation + per-request JSONL log; MusicAgent(app, role)
@@ -58,6 +59,7 @@ music_agent/
   learning/scoring.py   how signals add up per artist/track; TUNING = defaults for the Taste page's settings
   learning/playlists.py saved playlists (tracks stored with refs, so playing needs no search)
   learning/database.py  the shared SQLite connection + generic browse/search/add/edit for the GUI; add_check() rules; ensure_column()
+  trackinfo.py          track qualities from MusicBrainz + Deezer (no keys), cached in track_info; curator-only
   weather.py            Open-Meteo (no key), cached, optional
   text.py               norm() for loose name matching; duration formatting
   runtime.py            shared service: App + watcher + BotRunner + named Conversations (each with a role) + tools/curator
@@ -103,10 +105,20 @@ tests/                  one file per module; shared fakes/builders in tests/fake
   enforces must also be registered with `db.add_check(table, fn)`; time columns
   (`ts`, `created`, `updated`) are checked automatically. Readers of the data should still
   not crash on a bad value (see `Memory._weight`).
-- **Taste model:** preferences (worded, never fade), feedback and listens (fade),
-  adjustments (numeric nudge + optional reset that hides older signals), notebook
-  (curator's memory; `for_dj` notes reach the DJ). Weights live in `scoring.TUNING`,
-  overridable in `taste_settings`. Don't hard-code a weight elsewhere.
+- **Taste model:** preferences (worded, never fade; a love has `frequency` + `context`),
+  findings (curator's quiz conclusions + evidence; tentative until `check_finding` passes),
+  feedback and listens (fade), adjustments (numeric nudge + optional reset that hides
+  older signals), notebook (curator's memory; `for_dj` notes reach the DJ). Weights and
+  thresholds live in `scoring.TUNING`, overridable in `taste_settings`. Don't hard-code
+  a weight elsewhere.
+- **What doesn't train the taste:** finished tracks (weight 0), quiz samples
+  (`source='curator'`), music for others (`audience='others'`: the DJ's `for_others`,
+  guest mode, or a queue started for others). Quiz feedback counts fully for the track,
+  `quiz_feedback` for the artist, and never for liked tracks or time-of-day favourites.
+  A listen gets its source/audience from the latest play of that title (`_play_for`).
+- **Agents stay offline:** only `trackinfo.py` goes online, with title + artist, to two
+  fixed hosts. Only the curator (GUI, 127.0.0.1) has `look_up_tracks`; keep it off the
+  DJ, which reads Discord messages.
 - **Checking the GUI visually:** Node isn't installed. Headless Edge works:
   `msedge --headless=new --screenshot=out.png --window-size=1440,900 --virtual-time-budget=6000 URL`
   (its minimum viewport is ~492px; narrower screenshots are cropped, not broken).
@@ -142,4 +154,15 @@ tests/                  one file per module; shared fakes/builders in tests/fake
   `pages/taste.js` only assembles them.
 - **Preference wording matters:** a time of day on a *love* is rendered "(especially
   in the evening)", on an *avoid* "(in the morning only)". With "(evening only)" on a
-  love, the curator excluded that artist at other times.
+  love, the curator excluded that artist at other times. Frequencies are worded in
+  `FREQUENCY_WORDS`.
+- **Taste rework (2026-10-12):** the profile used to reflect background listening and
+  one long quiz evening: finished tracks scored +0.3 (enough to make background music
+  a top "liked" artist), skips avoided a track forever, quiz likes became "liked tracks"
+  in rotation, and "rarely" was faked with negative nudges. The DJ also picked by title
+  words (sunshine songs for mornings, the same one 10× in two weeks). A backup from
+  before is in `data/backups/` (git-ignored).
+- **Deezer tempo** is often 0 or doubled; `plausible_tempo` halves >190 and drops the
+  rest outside 50-190. MusicBrainz: ≤1 request/s and a User-Agent (enforced in `_mb_get`).
+- **Database lock is an RLock** so a row check (e.g. confirming a finding) can query
+  other tables inside `update_row`'s transaction.

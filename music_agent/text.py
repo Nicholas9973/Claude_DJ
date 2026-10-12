@@ -25,6 +25,22 @@ def norm(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+VERSION_SUFFIX = re.compile(r"\s+-\s+.*\b(remaster(ed)?|version|edit|mono|stereo|mix|live)\b.*$", re.IGNORECASE)
+
+
+def core_title(title: str | None) -> str:
+    """A song's title without version labels, normalised: what makes two plays "the same song".
+
+    Args:
+        title: A track title as the catalogue or the speaker gives it.
+
+    Returns:
+        E.g. ``"dreams"`` for ``"Dreams (2001 Remaster)"`` or ``"Dreams - 2004 Remaster"``.
+    """
+    text = re.sub(r"[\(\[].*?[\)\]]", "", title or "")
+    return norm(VERSION_SUFFIX.sub("", text)) or norm(title)
+
+
 def format_track_time(seconds: int | None) -> str:
     """Format a track length as minutes and seconds.
 

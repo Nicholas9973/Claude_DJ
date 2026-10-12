@@ -1,7 +1,7 @@
 """What the agents know about your taste, and every way to change it by hand.
 
-Preferences, feedback, score adjustments, the curator's notebook and the
-scoring settings can all be added, edited and removed here. Changes take effect
+Preferences, quiz findings, feedback, score adjustments, the curator's notebook
+and the scoring settings can all be added, edited and removed here. Changes take effect
 on the agents' next request.
 """
 
@@ -33,11 +33,14 @@ class Preference(BaseModel):
     artist: str | None = Field(None, max_length=300)
     part_of_day: PartOfDay | None = None
     note: str | None = Field(None, max_length=500)
+    frequency: Literal["regular", "sometimes", "rarely", "on_request"] | None = None
+    context: str | None = Field(None, max_length=200)
 
     def fields(self) -> dict[str, Any]:
         """As keyword arguments for ``Memory.add_preference`` / ``update_preference``."""
         return {"kind": self.kind, "sentiment": SENTIMENT[self.sentiment], "subject": self.subject,
-                "artist": self.artist, "part": self.part_of_day, "note": self.note}
+                "artist": self.artist, "part": self.part_of_day, "note": self.note,
+                "frequency": self.frequency, "context": self.context}
 
 
 class NewFeedback(BaseModel):
@@ -95,6 +98,14 @@ class NoteEdit(BaseModel):
     for_dj: bool | None = None
 
 
+class FindingEdit(BaseModel):
+    """New values for some fields of a finding; confirming still needs enough evidence."""
+
+    statement: str | None = Field(None, min_length=1, max_length=300)
+    status: Literal["tentative", "confirmed", "dropped"] | None = None
+    note: str | None = Field(None, max_length=500)
+
+
 class TuningValue(BaseModel):
     """A new value for a scoring setting, or null for its default."""
 
@@ -111,16 +122,17 @@ def _sent(model: BaseModel) -> dict[str, Any]:
 async def taste(memory: MemoryDep) -> dict[str, Any]:
     """Everything on the Taste page: the profile Claude sees, the scores behind it, and what you can edit."""
     part = part_of_day(datetime.now().hour)
-    profile, scores, prefs, adjustments, notes, tuning = await asyncio.gather(
+    profile, scores, prefs, findings, adjustments, notes, tuning = await asyncio.gather(
         asyncio.to_thread(memory.taste_profile, part),
         asyncio.to_thread(memory.affinities, 500),
         asyncio.to_thread(memory.preferences),
+        asyncio.to_thread(memory.findings, True),
         asyncio.to_thread(memory.adjustments),
         asyncio.to_thread(memory.notes, 200),
         asyncio.to_thread(memory.tuning_info),
     )
     return {"part_of_day": part, "profile": profile, "affinities": scores, "preferences": prefs,
-            "adjustments": adjustments, "notes": notes, "tuning": tuning}
+            "findings": findings, "adjustments": adjustments, "notes": notes, "tuning": tuning}
 
 
 # ---------------------------------------------------------------- feedback
@@ -186,6 +198,24 @@ async def remove_preference(memory: MemoryDep, pref_id: int) -> dict[str, bool]:
     """Delete a stated preference."""
     if not await asyncio.to_thread(memory.remove_preference, pref_id):
         raise HTTPException(404, f"No preference #{pref_id}.")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- findings
+@router.patch("/findings/{finding_id}")
+async def edit_finding(memory: MemoryDep, finding_id: int, body: FindingEdit) -> dict[str, Any]:
+    """Reword, confirm (only with enough evidence), drop or reopen a finding."""
+    try:
+        return {"finding": await asyncio.to_thread(lambda: memory.update_finding(finding_id, **_sent(body)))}
+    except KeyError:
+        raise HTTPException(404, f"No finding #{finding_id}.") from None
+
+
+@router.delete("/findings/{finding_id}")
+async def remove_finding(memory: MemoryDep, finding_id: int) -> dict[str, bool]:
+    """Delete a finding and its evidence."""
+    if not await asyncio.to_thread(memory.remove_finding, finding_id):
+        raise HTTPException(404, f"No finding #{finding_id}.")
     return {"ok": True}
 
 

@@ -67,6 +67,18 @@ def describe_result(text: str) -> str:
         skipped = sum(1 for x in data["listens"] if x["outcome"] == "skipped")
         return (f"last {data['days']} days: {len(data['listens'])} listens ({skipped} skipped), "
                 f"{len(data['dj_requests'])} DJ requests")
+    if isinstance(data, dict) and "statement" in data and "status" in data:
+        needs = f"; still needs: {', '.join(data['still_needs'])}" if data.get("still_needs") else ""
+        return f"finding #{data['id']} ({data['status']}, {len(data.get('evidence', []))} samples): {data['statement']}{needs}"
+    if isinstance(data, dict) and "feedback_id" in data:
+        found = "; ".join(f"#{f['id']} {f['status']}" + (" (can confirm)" if f.get("can_confirm") else "")
+                          for f in data.get("findings", []))
+        return f"saved quiz answer #{data['feedback_id']}" + (f"; findings: {found}" if found else "")
+    if isinstance(data, dict) and isinstance(data.get("tracks"), list) and data["tracks"] \
+            and isinstance(data["tracks"][0], dict) and "status" in data["tracks"][0]:
+        return "; ".join(f"{t.get('title', '?')}: " + (", ".join(str(x) for x in (t.get("year"), t.get("popularity"))
+                                                                  if x) or t["status"])
+                         for t in data["tracks"])
     if isinstance(data, dict) and "local_time" in data:
         pb = data.get("playback", {})
         taste = data.get("taste", {})

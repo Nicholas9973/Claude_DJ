@@ -10,7 +10,7 @@ from typing import Any, Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from music_agent.gui.routes.deps import RuntimeDep
+from music_agent.gui.routes.deps import MemoryDep, RuntimeDep
 from music_agent.learning.watcher import parse_hms
 
 router = APIRouter(tags=["playback"])
@@ -22,6 +22,12 @@ class VolumeBody(BaseModel):
     level: int | None = Field(None, ge=0, le=100)
     change: int | None = Field(None, ge=-50, le=50)
     room: str | None = Field(None, max_length=100)
+
+
+class GuestBody(BaseModel):
+    """Turn guest mode on for ``hours``, or off with null / 0."""
+
+    hours: float | None = Field(None, ge=0, le=24)
 
 
 class RateBody(BaseModel):
@@ -86,3 +92,17 @@ async def rate(rt: RuntimeDep, body: RateBody) -> dict[str, Any]:
         await rt.tools.playback_control("skip")
     return saved
 
+
+
+@router.get("/guest")
+async def guest(memory: MemoryDep) -> dict[str, Any]:
+    """Whether guest mode is on (music then doesn't train your taste), and until when."""
+    until = memory.guest_until()
+    return {"on": until is not None, "until": until.isoformat(timespec="minutes") if until else None}
+
+
+@router.post("/guest")
+async def set_guest(memory: MemoryDep, body: GuestBody) -> dict[str, Any]:
+    """Turn guest mode on for a number of hours, or off."""
+    memory.set_guest_mode(body.hours)
+    return await guest(memory)

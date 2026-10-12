@@ -35,6 +35,15 @@ TRACKS = {"type": "array", "maxItems": 50, "items": {
         "album": {"type": "string", "description": "Optional; helps pick the album version."},
     }}}
 PART_OF_DAY = {"type": "string", "enum": ["morning", "afternoon", "evening", "night"]}
+FREQUENCY = {"type": "string", "enum": ["regular", "sometimes", "rarely", "on_request"],
+             "description": "for a love: how often it should come up. sometimes = now and then; rarely = an "
+                            "occasional surprise; on_request = only when asked or the context fits. Anything "
+                            "but regular keeps it out of the DJ's liked lists. Use this, not a negative nudge."}
+CONTEXT = {"type": "string", "description": "when it applies, in a few words, e.g. 'at the gym', "
+                                            "'for massages or deep relaxation'"}
+FOR_OTHERS = {"type": "boolean",
+              "description": "true when the music is for other people (guests, a party, kids, someone else's "
+                             "request), so it doesn't train the owner's taste profile."}
 
 # Which tools each agent gets. Anything not listed is invisible to that agent.
 ROLE_TOOLS = {
@@ -42,6 +51,7 @@ ROLE_TOOLS = {
            "playback_control", "set_volume", "get_queue", "record_feedback"),
     "curator": ("get_context", "get_taste", "get_listening_history",
                 "add_preference", "update_preference", "remove_preference",
+                "add_finding", "record_quiz_answer", "confirm_finding", "update_finding", "look_up_tracks",
                 "record_feedback", "forget_feedback", "adjust_score", "remove_adjustment",
                 "write_note", "remove_note",
                 "play_tracks", "playback_control", "search_music",
@@ -89,16 +99,18 @@ def _music_tools(mt: MusicTools) -> list[SdkMcpTool]:
         tool("play_tracks",
              "Look up specific songs in the catalogue and queue the ones found, in the given order. "
              "Returns what was queued, total duration, and which songs were not found.",
-             _schema({"tracks": TRACKS, "mode": MODE, "rooms": ROOMS}, ["tracks"]))(
-            _wrap(lambda a: mt.play_tracks(a["tracks"], a.get("mode", "replace"), _rooms(a)))),
+             _schema({"tracks": TRACKS, "mode": MODE, "rooms": ROOMS, "for_others": FOR_OTHERS}, ["tracks"]))(
+            _wrap(lambda a: mt.play_tracks(a["tracks"], a.get("mode", "replace"), _rooms(a),
+                                           bool(a.get("for_others", False))))),
 
         tool("play_playlist",
              "Play one of the saved playlists listed in get_context (saved_playlists) by name. Fast: "
              "its tracks are already known, so nothing needs searching.",
              _schema({"name": {"type": "string"}, "mode": MODE, "rooms": ROOMS,
-                      "shuffle": {"type": "boolean", "description": "Play in random order."}}, ["name"]))(
+                      "shuffle": {"type": "boolean", "description": "Play in random order."},
+                      "for_others": FOR_OTHERS}, ["name"]))(
             _wrap(lambda a: mt.play_playlist(a["name"], a.get("mode", "replace"), _rooms(a),
-                                             bool(a.get("shuffle", False))))),
+                                             bool(a.get("shuffle", False)), bool(a.get("for_others", False))))),
 
         tool("search_music",
              "Search the catalogue. Use to discover albums/playlists/artists; returns refs for play_item.",
@@ -110,8 +122,9 @@ def _music_tools(mt: MusicTools) -> list[SdkMcpTool]:
 
         tool("play_item",
              "Play a single search result (e.g. a whole album or playlist) by its ref from search_music.",
-             _schema({"ref": {"type": "string"}, "mode": MODE, "rooms": ROOMS}, ["ref"]))(
-            _wrap(lambda a: mt.play_item(a["ref"], a.get("mode", "replace"), _rooms(a)))),
+             _schema({"ref": {"type": "string"}, "mode": MODE, "rooms": ROOMS, "for_others": FOR_OTHERS}, ["ref"]))(
+            _wrap(lambda a: mt.play_item(a["ref"], a.get("mode", "replace"), _rooms(a),
+                                         bool(a.get("for_others", False))))),
 
         tool("playback_control", "Pause, resume, skip to the next track, or stop.",
              _schema({"action": {"type": "string", "enum": ["pause", "resume", "skip", "stop"]}}, ["action"]))(
@@ -164,7 +177,8 @@ def _curator_tools(ct: CuratorTools) -> list[SdkMcpTool]:
         tool("add_preference",
              "Save a lasting preference the person states, e.g. 'I love Radiohead' (artist, like), "
              "'no reggaeton in the morning' (genre, dislike, part_of_day=morning), 'instrumental only while "
-             "I work' (rule, neutral). It never fades and outranks learned scores.",
+             "I work' (rule, neutral), 'I love Enya but only for massages' (artist, like, frequency=on_request, "
+             "context='massages or deep relaxation'). It never fades and outranks learned scores.",
              _schema({
                  "kind": {"type": "string", "enum": ["artist", "track", "genre", "rule"]},
                  "sentiment": {"type": "string", "enum": ["like", "dislike", "neutral"]},
@@ -172,9 +186,12 @@ def _curator_tools(ct: CuratorTools) -> list[SdkMcpTool]:
                  "artist": {"type": "string", "description": "for kind=track"},
                  "part_of_day": {**PART_OF_DAY, "description": "only at this time of day; omit for any time"},
                  "note": {"type": "string", "description": "nuance in the person's words"},
+                 "frequency": FREQUENCY,
+                 "context": CONTEXT,
              }, ["kind", "sentiment", "subject"]))(
             _wrap(lambda a: ct.add_preference(a["kind"], a["sentiment"], a["subject"], a.get("artist"),
-                                              a.get("part_of_day"), a.get("note")))),
+                                              a.get("part_of_day"), a.get("note"), a.get("frequency"),
+                                              a.get("context")))),
 
         tool("update_preference",
              "Change a stated preference by its id from get_taste; fields you leave out stay as they are. "
@@ -187,9 +204,66 @@ def _curator_tools(ct: CuratorTools) -> list[SdkMcpTool]:
                  "artist": {"type": "string", "description": "for kind=track"},
                  "part_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "night", "any"]},
                  "note": {"type": "string", "description": "empty string removes the note"},
+                 "frequency": FREQUENCY,
+                 "context": {**CONTEXT, "description": "when it applies; empty string removes it"},
              }, ["id"]))(
             _wrap(lambda a: ct.update_preference(a["id"], a.get("kind"), a.get("sentiment"), a.get("subject"),
-                                                 a.get("artist"), a.get("part_of_day"), a.get("note")))),
+                                                 a.get("artist"), a.get("part_of_day"), a.get("note"),
+                                                 a.get("frequency"), a.get("context")))),
+
+        tool("add_finding",
+             "Start a TENTATIVE conclusion from a quiz, e.g. 'dislikes K-pop' (genre, dislike). It reaches the DJ "
+             "only as a soft hint until confirm_finding succeeds. Back it with record_quiz_answer.",
+             _schema({
+                 "kind": {"type": "string", "enum": ["genre", "artist", "era", "mood", "other"]},
+                 "subject": {"type": "string", "description": "what it's about, e.g. 'K-pop', '70s soul'"},
+                 "sentiment": {"type": "string", "enum": ["like", "dislike", "neutral"],
+                               "description": "neutral = mixed"},
+                 "statement": {"type": "string", "description": "the conclusion as the DJ should read it"},
+                 "note": {"type": "string"},
+             }, ["kind", "subject", "sentiment", "statement"]))(
+            _wrap(lambda a: ct.add_finding(a["kind"], a["subject"], a["sentiment"], a["statement"],
+                                           a.get("note")))),
+
+        tool("record_quiz_answer",
+             "Record the person's reaction to a quiz sample (use instead of record_feedback in a quiz). Saves it "
+             "as feedback and as evidence for the findings you list; returns what each finding still needs.",
+             _schema({
+                 "title": {"type": "string"},
+                 "artist": {"type": "string"},
+                 "reaction": {"type": "string", "enum": ["love", "ok", "not_for_me"]},
+                 "finding_ids": {"type": "array", "items": {"type": "integer"},
+                                 "description": "findings this sample is evidence for"},
+                 "salvage": {"type": "boolean",
+                             "description": "true if you picked it to give the subject a fair chance: a different "
+                                            "side of it (sub-style, era, a less obvious artist) than before"},
+                 "note": {"type": "string", "description": "their words, if they said more"},
+             }, ["title", "artist", "reaction"]))(
+            _wrap(lambda a: ct.record_quiz_answer(a["title"], a["artist"], a["reaction"], a.get("finding_ids"),
+                                                  bool(a.get("salvage", False)), a.get("note")))),
+
+        tool("confirm_finding",
+             "Confirm a finding once the person agrees. The code refuses until the evidence is enough (enough "
+             "samples from different artists, not all famous hits, mostly agreeing, and a salvage try for a "
+             "dislike) and says what's missing.",
+             _schema({"id": {"type": "integer"}}, ["id"]))(_wrap(lambda a: ct.confirm_finding(a["id"]))),
+
+        tool("update_finding",
+             "Reword a finding, drop it (status=dropped) when the evidence goes against it, or reopen it.",
+             _schema({"id": {"type": "integer"}, "statement": {"type": "string"},
+                      "status": {"type": "string", "enum": ["tentative", "dropped"]},
+                      "note": {"type": "string"}}, ["id"]))(
+            _wrap(lambda a: ct.update_finding(a["id"], a.get("statement"), a.get("status"), a.get("note")))),
+
+        tool("look_up_tracks",
+             "Look up year, approximate tempo, style/mood tags and popularity (hit / well known / known / deep "
+             "cut) of up to 10 tracks in public music databases (done by code, cached). Use it to choose quiz "
+             "samples that aren't all famous hits, and to describe how music sounds.",
+             _schema({"tracks": {"type": "array", "maxItems": 10, "items": {
+                          "type": "object", "required": ["title", "artist"],
+                          "properties": {"title": {"type": "string"}, "artist": {"type": "string"}}}},
+                      "refresh": {"type": "boolean", "description": "ignore the cache"}}, ["tracks"]))(
+            _wrap(lambda a: ct.look_up_tracks(a["tracks"], bool(a.get("refresh", False))))),
 
         tool("remove_preference", "Delete a stated preference by its id from get_taste.",
              _schema({"id": {"type": "integer"}}, ["id"]))(_wrap(lambda a: ct.remove_preference(a["id"]))),

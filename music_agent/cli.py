@@ -12,6 +12,7 @@ Examples:
     python -m music_agent.cli now | queue | pause | resume | skip | stop
     python -m music_agent.cli volume 20 | +3 | -5
     python -m music_agent.cli taste | feedback | forget 12     (what the agent has learned)
+    python -m music_agent.cli info "Superstition" --artist "Stevie Wonder" [--refresh]   (track qualities)
 """
 
 from __future__ import annotations
@@ -161,6 +162,14 @@ def cmd_forget(app: App, args: argparse.Namespace) -> None:
     print("Deleted." if app.memory.forget_feedback(args.id) else f"No feedback #{args.id}.")
 
 
+def cmd_info(app: App, args: argparse.Namespace) -> None:
+    """Look up a track's year, tempo, tags and popularity (MusicBrainz, Deezer; cached)."""
+    if not app.trackinfo:
+        print("Track lookups need memory, which is turned off.")
+        return
+    print(json.dumps(app.trackinfo.look_up(args.title, args.artist, args.refresh), indent=2, ensure_ascii=False))
+
+
 def _simple(action: str) -> Callable[[App, argparse.Namespace], None]:
     """Make a handler for a one-word player command (pause, resume, skip, stop)."""
     def run(app: App, args: argparse.Namespace) -> None:
@@ -222,6 +231,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("forget", help="delete one feedback entry by #id")
     sp.add_argument("id", type=int)
     sp.set_defaults(fn=cmd_forget)
+    sp = sub.add_parser("info", help="look up a track's year, tempo, tags and popularity online")
+    sp.add_argument("title")
+    sp.add_argument("--artist")
+    sp.add_argument("--refresh", action="store_true", help="ignore the cached answer")
+    sp.set_defaults(fn=cmd_info)
     sp = sub.add_parser("volume")
     sp.add_argument("level", help="absolute (20) or relative (+3 / -5)")
     sp.set_defaults(fn=cmd_volume)

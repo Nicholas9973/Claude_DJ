@@ -1,11 +1,12 @@
 // Everything that shapes the agents' choices, and every way to change it by hand:
-// stated preferences, learned scores (nudge, reset, or make them preferences), adjustments,
+// stated preferences, quiz findings, learned scores (nudge, reset, or make them preferences), adjustments,
 // the curator's notebook, feedback, and the scoring settings. The cards live in ../taste/.
 
 import { api } from "../api.js";
 import { h, icon } from "../ui.js";
 import { card, chips, list, section, stat } from "../taste/common.js";
 import { feedbackCard } from "../taste/feedback.js";
+import { findingsCard } from "../taste/findings.js";
 import { notebookCard } from "../taste/notebook.js";
 import { preferencesEditor } from "../taste/preferences.js";
 import { adjustmentsList, scoresCard } from "../taste/scores.js";
@@ -22,7 +23,7 @@ export default {
     el.append(
       h("div", { class: "page-head" },
         h("div", {}, h("h1", {}, "What the DJ thinks"),
-          h("p", {}, "Your stated preferences come first and never fade. Scores are learned from feedback, skips and finished tracks; nudge or reset any of them, or tune how they're counted.")),
+          h("p", {}, "Your stated preferences come first and never fade. Quiz findings stay tentative until enough samples back them. Scores are learned from what you say and from skips (not from tracks that just played to the end); nudge or reset any of them, or tune how they're counted.")),
         h("button", { class: "btn small", onclick: () => load() }, icon("refresh"), "Refresh")),
       body);
 
@@ -37,6 +38,10 @@ export default {
 
       body.replaceChildren(
         card("Your preferences", preferencesEditor(t.preferences, load), { wide: true, top: true }),
+        card("Quiz findings", findingsCard(t.findings, load), {
+          wide: true, top: true,
+          hint: "What the curator concluded from quizzes. Tentative ones are only soft hints for the DJ; one can be confirmed once several samples from different artists back it (and, for a dislike, a fair second chance).",
+        }),
         h("div", { class: "stats" },
           stat(hist.tracks_played ?? 0, "tracks played"),
           stat(hist.feedback_given ?? 0, "pieces of feedback"),
@@ -62,6 +67,9 @@ export default {
             section("Avoiding tracks", chips(p.avoid_tracks, "bad")))),
           card("Notes the DJ follows", list(p.notes, "Add a note in Feedback or the Notebook.")),
           card("Played in the last 24 hours", list(recent, "Nothing yet today.")),
+          card("Keeping it fresh", h("div", {},
+            section("Played often lately (the DJ rests these)", chips(p.played_often_lately, "")),
+            section("Artists to rest for a while", chips(p.artists_to_rest, "")))),
           card("Scoring settings", tuningCard(t.tuning, load), {
             wide: true, hint: "How much each signal counts and where “liked” and “avoided” begin. Changed values are highlighted.",
           }),

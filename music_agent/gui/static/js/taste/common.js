@@ -5,7 +5,8 @@ import { h } from "../ui.js";
 export const SENTIMENTS = { like: "Love", dislike: "Avoid", neutral: "Neither" };
 export const SENTIMENT_OF = { 1: "like", [-1]: "dislike", 0: "neutral" };
 export const PARTS = { "": "Any time", morning: "Mornings", afternoon: "Afternoons", evening: "Evenings", night: "Nights" };
-export const SOURCE_LABELS = { stated: "stated", feedback: "feedback", listening: "listening", adjusted: "nudged" };
+export const SOURCE_LABELS = { stated: "stated", feedback: "feedback", quiz: "quiz", listening: "listening", adjusted: "nudged" };
+export const FREQUENCIES = { regular: "Regularly", sometimes: "Sometimes", rarely: "Rarely", on_request: "Only when asked" };
 
 /** A titled card; `wide` makes it span the whole grid row, `top` adds space below it (outside a grid). */
 export function card(title, content, { wide = false, top = false, hint = null } = {}) {
