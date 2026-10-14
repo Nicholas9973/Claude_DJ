@@ -74,10 +74,8 @@ async def main_async(args: argparse.Namespace) -> int:
         Exit code.
     """
     app = build()
-    if args.model:
-        app.config.agent.model = args.model
-    agent = MusicAgent(app, role="curator" if args.curator else "dj")
-    print(f"{DIM}Starting the {agent.role} (model: {app.config.agent.model})...{RESET}")
+    agent = MusicAgent(app, role="curator" if args.curator else "dj", model=args.model)
+    print(f"{DIM}Starting the {agent.role} (model: {agent.model})...{RESET}")
     try:
         await agent.start()
         if app.watcher:
@@ -122,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="music_agent.chat", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("request", nargs="*", help="one request to run, then exit")
-    p.add_argument("--model", help="override config: sonnet / haiku / opus / full model id")
+    p.add_argument("--model", help="override config and the GUI: sonnet / haiku / opus / full model id")
     p.add_argument("--show-results", action="store_true", help="print full tool results")
     p.add_argument("--curator", action="store_true", help="talk to the taste curator instead of the DJ")
     p.add_argument("-v", "--verbose", action="store_true")

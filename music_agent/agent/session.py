@@ -4,8 +4,9 @@ Security model: the agent gets NO built-in Claude Code tools (no shell, no
 files, no web). It can only call the music tools from ``server.py``, and every
 safety limit is enforced inside the Player, not in the prompt.
 
-The same class runs both agents; ``role`` picks the prompt and the tool set:
-``"dj"`` plays music, ``"curator"`` shapes taste and builds playlists.
+The same class runs every agent; ``role`` picks the prompt and the tool set:
+``"dj"`` plays music, ``"curator"`` shapes taste, builds playlists and edits the
+day plan, ``"orchestrator"`` follows the day plan by asking the DJ for music.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from claude_agent_sdk import (
 )
 
 from music_agent.agent.curator_tools import CuratorTools
+from music_agent.agent.dayplan_tools import AskDJ, DayPlanTools
 from music_agent.agent.prompt import build_system_prompt
 from music_agent.agent.server import ROLE_TOOLS, SERVER, TOOL_PREFIX, build_server
 from music_agent.agent.tools import MusicTools
@@ -48,6 +50,17 @@ def use_subscription_login() -> None:
     """
     if os.environ.pop("ANTHROPIC_API_KEY", None):
         log.warning("ANTHROPIC_API_KEY was set; ignoring it so usage goes to your Claude subscription.")
+
+
+def model_for(app: App, role: str) -> str:
+    """The Claude model an agent role uses: the System page's choice, else config.toml.
+
+    Args:
+        app: Wired-up parts (config and memory).
+        role: ``"dj"`` or ``"curator"``.
+    """
+    chosen = app.memory.agent_model(role) if app.memory else None
+    return chosen or app.config.agent.model_for(role)
 
 
 @dataclass
@@ -92,12 +105,16 @@ class MusicAgent:
     Args:
         app: Wired-up parts; defaults to ``app.build()``.
         role: ``"dj"`` (plays music) or ``"curator"`` (preferences, quizzes, playlists).
+        model: Use this model, whatever the config or the System page say
+            (``dj-chat --model``).
+        ask_dj: How the orchestrator hands requests to the DJ (from the runtime).
 
     Raises:
         ValueError: Unknown role.
     """
 
-    def __init__(self, app: App | None = None, role: str = "dj"):
+    def __init__(self, app: App | None = None, role: str = "dj", model: str | None = None,
+                 ask_dj: AskDJ | None = None):
         if role not in ROLE_TOOLS:
             raise ValueError(f"role must be one of {sorted(ROLE_TOOLS)}")
         self.app = app or build()
@@ -108,21 +125,30 @@ class MusicAgent:
                                 watcher=self.app.watcher, playlists=self.app.playlists)
         self.tools.source = role
         self.curator = CuratorTools(self.tools, self.app.trackinfo) if role == "curator" else None
+        self.day = (DayPlanTools(self.tools, self.app.day_plan_path, ask_dj)
+                    if role in ("curator", "orchestrator") else None)
         self.memory = self.app.memory
+        self._model_override = model
+        self._model = ""                     # the model the open conversation uses
         self._client: ClaudeSDKClient | None = None
         self._session_cost = 0.0
         self.log_path = PROJECT_ROOT / self.config.agent.log_dir / "agent.jsonl"
 
+    @property
+    def model(self) -> str:
+        """The model for the next request (a change on the System page applies right away)."""
+        return self._model_override or model_for(self.app, self.role)
+
     def options(self) -> ClaudeAgentOptions:
         """Build the locked-down SDK options (checked by ``tests/test_session.py``)."""
-        server, allowed = build_server(self.tools, self.curator, self.role)
+        server, allowed = build_server(self.tools, self.curator, self.role, self.day)
         try:
             rooms = self.app.player.rooms()
         except Exception:
             rooms = []
         return ClaudeAgentOptions(
             system_prompt=build_system_prompt(self.config, rooms, self.role),
-            model=self.config.agent.model,
+            model=self.model,
             mcp_servers={SERVER: server},
             tools=[],                                   # no built-in tools at all
             allowed_tools=allowed,
@@ -137,7 +163,9 @@ class MusicAgent:
         if self.config.agent.require_subscription:
             use_subscription_login()
         WORKDIR.mkdir(parents=True, exist_ok=True)
-        self._client = ClaudeSDKClient(options=self.options())
+        options = self.options()
+        self._model = options.model
+        self._client = ClaudeSDKClient(options=options)
         self._session_cost = 0.0
         await self._client.connect()
 
@@ -164,9 +192,12 @@ class MusicAgent:
         """
         if self._client is None:
             await self.start()
+        elif self.model != self._model:     # chosen on the System page mid-conversation
+            await self._client.set_model(self.model)
+            self._model = self.model
         turn = Turn(prompt=text)
         if self.memory:
-            self.tools.request_id = self.memory.start_request(text, self.config.agent.model, agent=self.role)
+            self.tools.request_id = self.memory.start_request(text, self._model, agent=self.role)
         await self._client.query(text)
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
@@ -202,7 +233,7 @@ class MusicAgent:
         entry = {
             "time": datetime.now().isoformat(timespec="seconds"),
             "agent": self.role,
-            "model": self.config.agent.model,
+            "model": self._model,
             "prompt": turn.prompt,
             "tool_calls": turn.tool_calls,
             "reply": turn.reply,

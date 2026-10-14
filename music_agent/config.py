@@ -96,7 +96,9 @@ class AgentConfig:
     """Claude agent settings.
 
     Attributes:
-        model: ``"sonnet"``, ``"haiku"``, ``"opus"`` or a full model id.
+        model: The DJ's model: ``"sonnet"``, ``"haiku"``, ``"opus"`` or a full model id.
+        curator_model: The curator's model (it runs less often, so a stronger one).
+        orchestrator_model: The model of the orchestrator, which runs the day plan.
         max_turns: Safety net against runaway tool loops.
         require_subscription: Ignore ``ANTHROPIC_API_KEY`` so usage goes to
             the Claude subscription.
@@ -104,9 +106,15 @@ class AgentConfig:
     """
 
     model: str = "sonnet"
+    curator_model: str = "opus"
+    orchestrator_model: str = "sonnet"
     max_turns: int = 20
     require_subscription: bool = True
     log_dir: str = "data/logs"
+
+    def model_for(self, role: str) -> str:
+        """The configured model for an agent role (``"dj"``, ``"curator"`` or ``"orchestrator"``)."""
+        return {"curator": self.curator_model, "orchestrator": self.orchestrator_model}.get(role, self.model)
 
 
 @dataclass

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from music_agent.config import PROJECT_ROOT, Config, load_config
+from music_agent.dayplan import DAY_PLAN_PATH
 from music_agent.learning.memory import Memory
 from music_agent.learning.playlists import PlaylistStore
 from music_agent.learning.watcher import PlaybackWatcher
@@ -30,6 +32,7 @@ class App:
         playlists: Saved playlists (in the memory's database); None without memory.
         trackinfo: Looks up track qualities online for the curator (cached in
             the memory's database); None without memory.
+        day_plan_path: The day plan the orchestrator follows (``day_plan.toml``).
     """
 
     config: Config
@@ -40,6 +43,7 @@ class App:
     watcher: PlaybackWatcher | None = None
     playlists: PlaylistStore | None = None
     trackinfo: TrackInfoService | None = None
+    day_plan_path: Path = DAY_PLAN_PATH
 
 
 def build(config: Config | None = None, with_memory: bool = True) -> App:

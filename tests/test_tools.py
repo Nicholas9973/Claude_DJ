@@ -198,3 +198,45 @@ def test_play_playlist_errors():
     _saved(night, "Mix", CATALOGUE[:1])
     with pytest.raises(ToolError, match="safety rule"):
         run(night.play_playlist("Mix"))
+
+
+def test_genre_of_the_set_holds_for_an_hour():
+    from datetime import timedelta
+
+    from tests.fakes import Clock
+    clock = Clock()
+    memory = make_memory(clock)
+    tools, _ = make_tools(now=clock, memory=memory)
+    tools.request_id = memory.start_request("some bossa nova", agent="dj")
+    run(tools.play_tracks([{"title": "So What", "artist": "Miles Davis"}], genre="bossa nova"))
+    clock.t += timedelta(minutes=40)
+    tools.request_id = memory.start_request("more please", agent="dj")
+    run(tools.play_tracks([{"title": "Chan Chan", "artist": "Buena Vista Social Club"}], mode="append",
+                          genre="Bossa Nova"))
+    current = run(tools.get_context())["current_genre"]
+    assert current["genre"] == "Bossa Nova" and current["since"] == "18:30" and current["for_minutes"] == 40
+    assert current["last_request"] == "more please"
+    clock.t += timedelta(minutes=61)
+    assert "current_genre" not in run(tools.get_context())
+    # A curator's quiz sample never sets the genre of the DJ's set.
+    tools.request_id = memory.start_request("quiz me", agent="curator")
+    run(tools.play_tracks([{"title": "So What", "artist": "Miles Davis"}], genre="jazz"))
+    assert "current_genre" not in run(tools.get_context())
+
+
+def test_often_requested_genres_and_playlist_suggestions():
+    memory = make_memory()
+    tools, _ = make_tools(memory=memory)
+    for genre in ("bossa nova", "Bossa Nova", "bossa nova", "techno"):
+        memory.set_request_genre(memory.start_request("music", agent="dj"), genre)
+    assert memory.common_genres() == [{"genre": "bossa nova", "requests": 3}]
+    assert run(tools.get_context())["often_requested_genres_last_30_days"][0]["requests"] == 3
+    out = run(tools.suggest_playlist("bossa nova for cooking", "asked for 3 times, no playlist fits"))
+    assert out["saved"] is True
+    assert run(tools.suggest_playlist("Bossa nova for cooking!", "again"))["already_noted"] is True
+    [note] = memory.notes()
+    assert note["author"] == "dj" and note["topic"] == "playlist idea: bossa nova for cooking"
+    with pytest.raises(ToolError):
+        run(tools.suggest_playlist(" ", "why"))
+    history = memory.listening_history()
+    assert history["dj_requests"][0]["genre"] == "techno"

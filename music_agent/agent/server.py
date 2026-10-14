@@ -2,8 +2,8 @@
 
 This file is the whole contract with Claude: each tool's name, description and
 JSON schema, and which tools each agent role gets (``ROLE_TOOLS``). The
-behaviour lives in ``tools.py`` and ``curator_tools.py``; the conversation in
-``session.py``.
+behaviour lives in ``tools.py``, ``curator_tools.py`` and ``dayplan_tools.py``;
+the conversation in ``session.py``.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Any
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
 
 from music_agent.agent.curator_tools import CuratorTools
+from music_agent.agent.dayplan_tools import DayPlanTools
 from music_agent.agent.tools import MusicTools, ToolError
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ FREQUENCY = {"type": "string", "enum": ["regular", "sometimes", "rarely", "on_re
                             "but regular keeps it out of the DJ's liked lists. Use this, not a negative nudge."}
 CONTEXT = {"type": "string", "description": "when it applies, in a few words, e.g. 'at the gym', "
                                             "'for massages or deep relaxation'"}
+GENRE = {"type": "string",
+         "description": "the one genre (or tight style family) you chose for this set, e.g. 'bossa nova' or "
+                        "'70s soul'; get_context shows it as current_genre for the next hour"}
 FOR_OTHERS = {"type": "boolean",
               "description": "true when the music is for other people (guests, a party, kids, someone else's "
                              "request), so it doesn't train the owner's taste profile."}
@@ -48,26 +52,54 @@ FOR_OTHERS = {"type": "boolean",
 # Which tools each agent gets. Anything not listed is invisible to that agent.
 ROLE_TOOLS = {
     "dj": ("get_context", "play_tracks", "play_playlist", "search_music", "play_item",
-           "playback_control", "set_volume", "get_queue", "record_feedback"),
+           "playback_control", "set_volume", "get_queue", "record_feedback", "suggest_playlist"),
     "curator": ("get_context", "get_taste", "get_listening_history",
                 "add_preference", "update_preference", "remove_preference",
                 "add_finding", "record_quiz_answer", "confirm_finding", "update_finding", "look_up_tracks",
                 "record_feedback", "forget_feedback", "adjust_score", "remove_adjustment",
                 "write_note", "remove_note",
                 "play_tracks", "playback_control", "search_music",
-                "save_playlist", "get_playlist", "delete_playlist", "play_playlist"),
+                "save_playlist", "get_playlist", "delete_playlist", "play_playlist",
+                "get_day_plan", "update_day_plan"),
+    # Runs the day: reads the plan and the taste, and asks the DJ for music. It can't stop
+    # music or change the volume, so it can't fight the person.
+    "orchestrator": ("get_day_plan", "get_context", "ask_dj"),
 }
+
+SLOT = {"type": "object", "required": ["start"], "properties": {
+    "start": {"type": "string", "description": "'HH:MM', or 'wake' / 'sleep' with an offset like 'wake+90m', "
+                                               "'sleep-1h'"},
+    "mood": {"type": "string", "description": "what the person wants then, roughly, in their words"},
+    "days": {"type": "string", "enum": ["all", "weekdays", "weekend"]},
+    "rooms": {"type": "array", "items": {"type": "string"}, "description": "only these rooms; omit for the default"},
+    "quiet": {"type": "boolean", "description": "true: don't start music in this part of the day"},
+}}
+DAY_PLAN = {"type": "object", "properties": {
+    "enabled": {"type": "boolean", "description": "the orchestrator runs only when true"},
+    "wake": {"type": "string", "description": "weekday wake-up, HH:MM"},
+    "sleep": {"type": "string", "description": "weekday bedtime (music isn't started after it), HH:MM"},
+    "weekend_wake": {"type": "string"},
+    "weekend_sleep": {"type": "string"},
+    "check_every_minutes": {"type": "integer", "minimum": 1, "maximum": 60},
+    "quiet_after_stop_hours": {"type": "number", "minimum": 0, "maximum": 24},
+    "respect_requests_minutes": {"type": "integer", "minimum": 0, "maximum": 1440,
+                                 "description": "music the person chose isn't replaced at a new slot until "
+                                                "it is this old"},
+    "slots": {"type": "array", "items": SLOT},
+}, "description": "the WHOLE plan, as get_day_plan returns it under 'plan', changed only where needed"}
 
 ToolFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
-def build_tools(mt: MusicTools, curator: CuratorTools | None = None, role: str = "dj") -> list[SdkMcpTool]:
+def build_tools(mt: MusicTools, curator: CuratorTools | None = None, role: str = "dj",
+                day: DayPlanTools | None = None) -> list[SdkMcpTool]:
     """Wrap the tool methods a role may use as Agent SDK tools.
 
     Args:
         mt: The music tools.
         curator: The curator's tools; needed for ``role="curator"``.
         role: A key of ``ROLE_TOOLS``.
+        day: The day plan tools; needed for the curator and the orchestrator.
 
     Returns:
         SDK tool definitions, in ``ROLE_TOOLS`` order. Handlers return the
@@ -75,16 +107,18 @@ def build_tools(mt: MusicTools, curator: CuratorTools | None = None, role: str =
         a bug never ends the session.
 
     Raises:
-        ValueError: Unknown role, or ``"curator"`` without ``curator``.
+        ValueError: Unknown role, or a role without the tools it needs.
     """
     if role not in ROLE_TOOLS:
         raise ValueError(f"role must be one of {sorted(ROLE_TOOLS)}")
     available = {t.name: t for t in _music_tools(mt)}
     if curator:
         available.update((t.name, t) for t in _curator_tools(curator))
+    if day:
+        available.update((t.name, t) for t in _day_plan_tools(day))
     missing = [n for n in ROLE_TOOLS[role] if n not in available]
     if missing:
-        raise ValueError(f"role '{role}' needs CuratorTools for {', '.join(missing)}")
+        raise ValueError(f"role '{role}' is missing the tools {', '.join(missing)}")
     return [available[n] for n in ROLE_TOOLS[role]]
 
 
@@ -92,25 +126,28 @@ def _music_tools(mt: MusicTools) -> list[SdkMcpTool]:
     """Every ``MusicTools`` method as an SDK tool."""
     return [
         tool("get_context",
-             "Current local time, weekday, part of day, what's playing, queue, rooms, volume and safety limits. "
+             "Current local time, weekday, part of day, what's playing, queue, rooms, volume and safety limits, "
+             "the taste profile, saved playlists, the genre of the current set and often requested genres. "
              "Call this before choosing music.",
              _schema({}))(_wrap(lambda a: mt.get_context())),
 
         tool("play_tracks",
              "Look up specific songs in the catalogue and queue the ones found, in the given order. "
              "Returns what was queued, total duration, and which songs were not found.",
-             _schema({"tracks": TRACKS, "mode": MODE, "rooms": ROOMS, "for_others": FOR_OTHERS}, ["tracks"]))(
+             _schema({"tracks": TRACKS, "mode": MODE, "rooms": ROOMS, "for_others": FOR_OTHERS,
+                      "genre": GENRE}, ["tracks"]))(
             _wrap(lambda a: mt.play_tracks(a["tracks"], a.get("mode", "replace"), _rooms(a),
-                                           bool(a.get("for_others", False))))),
+                                           bool(a.get("for_others", False)), a.get("genre")))),
 
         tool("play_playlist",
              "Play one of the saved playlists listed in get_context (saved_playlists) by name. Fast: "
              "its tracks are already known, so nothing needs searching.",
              _schema({"name": {"type": "string"}, "mode": MODE, "rooms": ROOMS,
                       "shuffle": {"type": "boolean", "description": "Play in random order."},
-                      "for_others": FOR_OTHERS}, ["name"]))(
+                      "for_others": FOR_OTHERS, "genre": GENRE}, ["name"]))(
             _wrap(lambda a: mt.play_playlist(a["name"], a.get("mode", "replace"), _rooms(a),
-                                             bool(a.get("shuffle", False)), bool(a.get("for_others", False))))),
+                                             bool(a.get("shuffle", False)), bool(a.get("for_others", False)),
+                                             a.get("genre")))),
 
         tool("search_music",
              "Search the catalogue. Use to discover albums/playlists/artists; returns refs for play_item.",
@@ -122,9 +159,10 @@ def _music_tools(mt: MusicTools) -> list[SdkMcpTool]:
 
         tool("play_item",
              "Play a single search result (e.g. a whole album or playlist) by its ref from search_music.",
-             _schema({"ref": {"type": "string"}, "mode": MODE, "rooms": ROOMS, "for_others": FOR_OTHERS}, ["ref"]))(
+             _schema({"ref": {"type": "string"}, "mode": MODE, "rooms": ROOMS, "for_others": FOR_OTHERS,
+                      "genre": GENRE}, ["ref"]))(
             _wrap(lambda a: mt.play_item(a["ref"], a.get("mode", "replace"), _rooms(a),
-                                         bool(a.get("for_others", False))))),
+                                         bool(a.get("for_others", False)), a.get("genre")))),
 
         tool("playback_control", "Pause, resume, skip to the next track, or stop.",
              _schema({"action": {"type": "string", "enum": ["pause", "resume", "skip", "stop"]}}, ["action"]))(
@@ -155,6 +193,16 @@ def _music_tools(mt: MusicTools) -> list[SdkMcpTool]:
              }, ["sentiment", "about"]))(
             _wrap(lambda a: mt.record_feedback(a["sentiment"], a["about"], a.get("title"),
                                                a.get("artist"), a.get("note")))),
+
+        tool("suggest_playlist",
+             "Leave a note for the taste curator: a kind of request comes up often enough to deserve its own "
+             "saved playlist. The same idea is only noted once.",
+             _schema({"idea": {"type": "string",
+                               "description": "what the playlist would be for, e.g. 'bossa nova for cooking'"},
+                      "why": {"type": "string",
+                              "description": "the evidence, e.g. 'bossa nova asked for 4 times in 30 days, "
+                                             "no saved playlist fits'"}}, ["idea", "why"]))(
+            _wrap(lambda a: mt.suggest_playlist(a["idea"], a["why"]))),
     ]
 
 
@@ -168,8 +216,10 @@ def _curator_tools(ct: CuratorTools) -> list[SdkMcpTool]:
              _schema({}))(_wrap(lambda a: ct.get_taste())),
 
         tool("get_listening_history",
-             "What really happened lately: tracks finished or skipped (with when and how much was heard), "
-             "counts per artist, and what the person asked the DJ for. Use it to spot patterns worth asking about.",
+             "What really happened lately: tracks finished or skipped (with when, how much was heard and the "
+             "set's genre), counts per artist and per genre, how often each genre was chosen (by the person's "
+             "requests and by the day plan), and what the person asked the DJ for. Use it to spot patterns "
+             "worth asking about.",
              _schema({"days": {"type": "integer", "minimum": 1, "maximum": 90, "description": "default 14"},
                       "artist": {"type": "string", "description": "only this artist"}}))(
             _wrap(lambda a: ct.get_listening_history(a.get("days", 14), a.get("artist")))),
@@ -330,20 +380,45 @@ def _curator_tools(ct: CuratorTools) -> list[SdkMcpTool]:
     ]
 
 
-def build_server(mt: MusicTools, curator: CuratorTools | None = None,
-                 role: str = "dj") -> tuple[Any, list[str]]:
+def _day_plan_tools(dt: DayPlanTools) -> list[SdkMcpTool]:
+    """Every ``DayPlanTools`` method as an SDK tool."""
+    return [
+        tool("get_day_plan",
+             "The person's day plan (a rough outline of the music they want when), today's times for each part "
+             "of the day (the current one marked now), whether a stop is being respected (quiet_until), and "
+             "how it went lately: the orchestrator's recent runs and when the person stopped the music.",
+             _schema({}))(_wrap(lambda a: dt.get_day_plan())),
+
+        tool("update_day_plan",
+             "Replace the day plan the orchestrator follows. Send the whole plan back (from get_day_plan's "
+             "'plan'), changed only where needed. It is checked before saving; the error says what's wrong.",
+             _schema({"plan": DAY_PLAN}, ["plan"]))(_wrap(lambda a: dt.update_day_plan(a["plan"]))),
+
+        tool("ask_dj",
+             "Ask the DJ to play music: describe the style, energy, roughly how long, the queue mode "
+             "(replace / append) and rooms if needed. The DJ picks and queues the tracks and replies.",
+             _schema({"request": {"type": "string", "description": "e.g. 'About an hour of gentle acoustic folk "
+                                                                   "and soft jazz, low energy building slowly. "
+                                                                   "Replace the queue.'"}}, ["request"]))(
+            _wrap(lambda a: dt.ask_dj(a["request"]))),
+    ]
+
+
+def build_server(mt: MusicTools, curator: CuratorTools | None = None, role: str = "dj",
+                 day: DayPlanTools | None = None) -> tuple[Any, list[str]]:
     """Create the MCP server for the SDK options.
 
     Args:
         mt: The music tools.
         curator: The curator's tools, for ``role="curator"``.
         role: Which tool set to expose (``ROLE_TOOLS``).
+        day: The day plan tools, for the curator and the orchestrator.
 
     Returns:
         ``(server config, allowed tool names)``; the names are what
         ``ClaudeAgentOptions.allowed_tools`` must list, and nothing else.
     """
-    tools = build_tools(mt, curator, role)
+    tools = build_tools(mt, curator, role, day)
     server = create_sdk_mcp_server(name=SERVER, version="1.0.0", tools=tools)
     return server, [f"{TOOL_PREFIX}{t.name}" for t in tools]
 

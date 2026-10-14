@@ -11,9 +11,10 @@
 
 import chat from "./chat.js";
 import database from "./database.js";
+import day from "./day.js";
 import now from "./now.js";
 import playlists from "./playlists.js";
 import system from "./system.js";
 import taste from "./taste.js";
 
-export const PAGES = [now, chat, playlists, taste, database, system];
+export const PAGES = [now, chat, day, playlists, taste, database, system];

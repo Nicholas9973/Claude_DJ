@@ -180,3 +180,28 @@ def test_occasional_loves_through_the_curator(curator):
     assert saved["preference"].startswith("love artist: Enya (only when asked for")
     updated = run(curator.update_preference(saved["id"], frequency="rarely", context=""))
     assert updated["preference"] == "love artist: Enya (rarely: an occasional surprise at most, never a regular)"
+
+
+def test_listening_history_by_genre(curator):
+    m = curator.memory
+    tools = curator.music
+    tools.request_id = m.start_request("some folk", agent="dj")
+    run(tools.play_tracks([{"title": "So What", "artist": "Miles Davis"},
+                           {"title": "Chan Chan", "artist": "Buena Vista Social Club"}], genre="Folk"))
+    m.record_listen("So What", "Miles Davis", "completed", 562, 562)
+    m.record_listen("Chan Chan", "Buena Vista Social Club", "skipped", 20, 240)
+    m.record_listen("Elsewhere", "Somebody", "skipped", 20, 240)                 # started from the Sonos app
+    m.set_request_genre(m.start_request("[Day plan] gentle folk", agent="dj"), "folk")
+    m.set_request_genre(m.start_request("[Day plan] soul", agent="dj"), "soul")
+    h = run(curator.get_listening_history())
+    assert h["by_genre"] == [{"genre": "Folk", "completed": 1, "skipped": 1}]
+    assert [x.get("genre") for x in h["listens"]] == [None, "Folk", "Folk"]
+    assert h["genres_chosen"] == [{"genre": "Folk", "by_you": 1, "by_day_plan": 1},
+                                  {"genre": "soul", "by_you": 0, "by_day_plan": 1}]
+
+
+def test_curator_prompt_keeps_genre_preferences_coherent():
+    from music_agent.agent.prompt import CURATOR_PROMPT
+    for phrase in ("coherent", "Tidying genre preferences", "go deeper within it", "genres_chosen"):
+        assert phrase in CURATOR_PROMPT
+

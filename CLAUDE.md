@@ -6,9 +6,11 @@ overview; this file holds what a new session needs to work safely and quickly.
 ## What this is
 
 A personal project: a Discord bot → Claude agent (Claude Agent SDK) → Sonos
-speakers, playing from Qobuz. Two agent roles share one `MusicAgent` class:
-the **DJ** (plays music; Discord, GUI Now playing page) and the **curator**
-(preferences, listening quizzes, saved playlists; GUI Chat page). The owner is learning how Claude agents work with
+speakers, playing from Qobuz. Three agent roles share one `MusicAgent` class:
+the **DJ** (plays music; Discord, GUI Now playing page), the **curator**
+(preferences, listening quizzes, saved playlists, the day plan; GUI Chat page)
+and the **orchestrator** (runs by itself: follows `day_plan.toml` and asks the
+DJ for music through `ask_dj`; GUI Day page). The owner is learning how Claude agents work with
 multiple systems, so explain choices briefly and prefer clear code over clever code.
 
 ## Environment
@@ -33,7 +35,7 @@ python -m pip install -r requirements.txt   # = pip install -e .[dev] (pyproject
 python -m pytest                            # all tests use fakes; no network, no speakers, no Claude
 ruff check .                                # must stay clean
 python -m music_agent.gui                   # GUI + bot (dj-gui); http://127.0.0.1:8765, logs to data/logs/gui.log
-python -m music_agent.gui --no-bot --no-browser --port 8799   # safe for testing alongside a running bot
+python -m music_agent.gui --no-bot --no-browser --port 8799   # safe for testing alongside a running bot (no orchestrator either)
 python -m music_agent.discord_bot           # just the bot (dj-bot); logs to data/logs/bot.log
 python -m music_agent.chat                  # DJ in the terminal, shows every tool call (dj-chat); --curator for the curator
 python -m music_agent.cli --help            # no-AI control and diagnostics (dj)
@@ -49,7 +51,8 @@ music_agent/
   agent/tools.py        the DJ's actions (plain async Python, returns dicts); also shared track lookup
   agent/curator_tools.py  the curator's extra actions: preferences, findings + quiz answers, track lookups,
                         score nudges, notebook, history, playlists
-  agent/prompt.py       both agents' instructions in plain English (DJ and CURATOR prompts)
+  agent/dayplan_tools.py  day plan actions: get/update the plan (curator), get it + ask_dj (orchestrator)
+  agent/prompt.py       the agents' instructions in plain English (DJ, CURATOR, ORCHESTRATOR prompts)
   agent/server.py       tool names, descriptions, JSON schemas, and ROLE_TOOLS (which tools each role gets)
   agent/session.py      SDK options (lockdown) + conversation + per-request JSONL log; MusicAgent(app, role)
   providers/            search: sonos_service.py (SoCo MusicService), base.py (lookup cascade), matching.py (scoring)
@@ -61,8 +64,11 @@ music_agent/
   learning/database.py  the shared SQLite connection + generic browse/search/add/edit for the GUI; add_check() rules; ensure_column()
   trackinfo.py          track qualities from MusicBrainz + Deezer (no keys), cached in track_info; curator-only
   weather.py            Open-Meteo (no key), cached, optional
+  dayplan.py            day_plan.toml: load/check/save, slot times relative to wake/sleep
+  orchestrator.py       when to wake the orchestrator agent: decide() (pure) + the background loop
   text.py               norm() for loose name matching; duration formatting
-  runtime.py            shared service: App + watcher + BotRunner + named Conversations (each with a role) + tools/curator
+  runtime.py            shared service: App + watcher + BotRunner + Orchestrator + named Conversations
+                        (each with a role; "orchestrator" and "auto-dj" are the orchestrator's) + tools/curator
   gui/                  launcher.py (entry), server.py (FastAPI app), routes/ (JSON API, one file per feature),
                         static/ (plain HTML/CSS/JS ES modules, no build; pages/index.js lists the pages;
                         js/chat.js is the chat panel both agents' pages use)
@@ -164,5 +170,29 @@ tests/                  one file per module; shared fakes/builders in tests/fake
   before is in `data/backups/` (git-ignored).
 - **Deezer tempo** is often 0 or doubled; `plausible_tempo` halves >190 and drops the
   rest outside 50-190. MusicBrainz: ≤1 request/s and a User-Agent (enforced in `_mb_get`).
+- **One genre per set (2026-10-14):** the DJ passes `genre` to its play tools; it's stored on
+  `requests.genre`. `get_context` shows `current_genre` (held `GENRE_HOLD_MINUTES` after the
+  last request choosing it) and `often_requested_genres_last_30_days`; the DJ's
+  `suggest_playlist` writes a notebook note with author `dj` for the curator. Saved playlists
+  are now used sparingly (only when named or an exact fit). Old `music.db` files get the
+  notebook rebuilt once to allow `'dj'` (`Memory._allow_dj_notes`).
+- **Models per role:** `[agent] model` (DJ, sonnet), `curator_model` (opus) and
+  `orchestrator_model` (sonnet); the System page's choice (`agent_models` table) wins;
+  `dj-chat --model` wins over both.
+  `session.model_for(app, role)` resolves it; a change applies via `set_model` on the next request.
+- **Orchestrator (2026-10-14):** code decides *when* (`orchestrator.decide`: nothing playing,
+  ≤2 tracks left, a new slot unless the person's own music is < `respect_requests_minutes`
+  old), Claude decides *what*. Each run starts fresh conversations ("orchestrator" and
+  "auto-dj") to stay cheap; at most `MAX_RUNS_PER_DAY`. The auto-DJ's `MusicTools.source` is
+  `"auto"`: its plays don't count as the person's choice and its stops don't start a quiet
+  period. Anyone else's pause/stop calls `memory.start_quiet` (table `quiet_requests`); any
+  non-auto play or resume ends it; a playing→paused change seen on the speakers counts too.
+  Only one process may orchestrate: `Runtime.start(orchestrate=...)`, off with `--no-bot`.
+  CHECK constraints that gain values use `db.widen_check` (rebuilds the table, keeps rows).
+- **Genres in the taste model:** listens copy the set's genre from their play's request
+  (`listens.genre`, via `_play_for`), so `listening_history` has `by_genre` and `genres_chosen`
+  (you vs. the day plan, told apart by the `[Day plan]` prefix). A "genre" is a coherent theme
+  (may cross neighbouring genres, must work as one set), not a strict record-shop genre; the
+  curator keeps preferences to one such theme each and quizzes within loved genres.
 - **Database lock is an RLock** so a row check (e.g. confirming a finding) can query
   other tables inside `update_row`'s transaction.

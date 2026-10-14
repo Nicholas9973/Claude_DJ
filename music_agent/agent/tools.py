@@ -24,6 +24,9 @@ from music_agent.text import format_minutes, format_track_time
 from music_agent.weather import WeatherService
 
 MAX_TRACKS_PER_CALL = 50
+GENRE_HOLD_MINUTES = 60      # get_context shows the set's genre this long after the last request that chose it
+COMMON_GENRE_DAYS = 30       # ...and genres chosen for at least COMMON_GENRE_REQUESTS requests in this many days
+COMMON_GENRE_REQUESTS = 3
 SEARCH_CONCURRENCY = 4
 SENTIMENT = {"like": 1, "dislike": -1, "neutral": 0}
 
@@ -47,8 +50,11 @@ class MusicTools:
 
     Attributes:
         request_id: Memory id of the request being handled; set by the agent.
-        source: Who is acting, recorded with each queued track: "dj", "curator"
-            or "gui" (quiz samples from the curator don't count as recently played).
+        source: Who is acting, recorded with each queued track: "dj", "curator",
+            "gui", or "auto" for the DJ working for the orchestrator (quiz samples
+            from the curator don't count as recently played). Anyone but "auto"
+            stopping the music makes the orchestrator stay quiet for a while, and
+            starting music ends that.
     """
 
     def __init__(self, config: Config, player: Player, provider: MusicProvider,
@@ -105,6 +111,12 @@ class MusicTools:
                 ctx["weather"] = weather.as_dict()
         if self.memory:
             ctx["taste"] = await asyncio.to_thread(self.memory.taste_profile, part_of_day(now.hour))
+            current = await asyncio.to_thread(self.memory.current_genre, GENRE_HOLD_MINUTES)
+            if current:
+                ctx["current_genre"] = current
+            common = await asyncio.to_thread(self.memory.common_genres, COMMON_GENRE_DAYS, COMMON_GENRE_REQUESTS)
+            if common:
+                ctx[f"often_requested_genres_last_{COMMON_GENRE_DAYS}_days"] = common
             guest_until = self.memory.guest_until()
             if guest_until:
                 ctx["guest_mode"] = f"on until {guest_until:%H:%M}: music is for guests and doesn't train the taste"
@@ -148,7 +160,8 @@ class MusicTools:
 
     # ------------------------------------------------------------ play
     async def play_tracks(self, tracks: list[dict[str, str]], mode: str = "replace",
-                          rooms: str | list[str] | None = None, for_others: bool = False) -> dict[str, Any]:
+                          rooms: str | list[str] | None = None, for_others: bool = False,
+                          genre: str | None = None) -> dict[str, Any]:
         """Look up each requested song, then queue the ones found, in order.
 
         Lookups run in parallel (``SEARCH_CONCURRENCY`` at a time); duplicates
@@ -160,6 +173,8 @@ class MusicTools:
             rooms: Room names, or None for the default.
             for_others: The music is for other people (guests, a party), so
                 listening to it doesn't train the owner's taste.
+            genre: The genre the DJ chose for this set; ``get_context`` shows
+                it as ``current_genre`` for a while, to keep later requests consistent.
 
         Returns:
             What was queued, total duration, and for each miss why it was
@@ -180,7 +195,9 @@ class MusicTools:
             return {"queued": 0, "not_found": not_found,
                     "note": "Nothing was found, so nothing changed. Pick other tracks, "
                             "preferably from catalogue_tracks_by_artist."}
-        return {**await self._queue(items, mode, rooms, for_others), "not_found": not_found}
+        out = await self._queue(items, mode, rooms, for_others)
+        await self._set_genre(genre)
+        return {**out, "not_found": not_found}
 
     async def lookup_tracks(self, tracks: list[dict[str, str]]) -> tuple[list[MediaItem], list[dict[str, Any]]]:
         """Find requested songs in the catalogue (``SEARCH_CONCURRENCY`` lookups at a time).
@@ -237,7 +254,18 @@ class MusicTools:
         }
         if for_others or (self.memory and self.memory.guest_until()):
             out["for_others"] = True
+        await self._music_wanted()
         return out
+
+    async def _music_wanted(self) -> None:
+        """The person started music: the orchestrator's quiet period after a stop is over."""
+        if self.memory and self.source != "auto":
+            await asyncio.to_thread(self.memory.end_quiet)
+
+    async def _set_genre(self, genre: str | None) -> None:
+        """Record the genre of the set for the request being handled (see ``Memory.current_genre``)."""
+        if genre and genre.strip() and self.memory and self.request_id:
+            await asyncio.to_thread(self.memory.set_request_genre, self.request_id, genre)
 
     def _starting(self, mode: str, for_others: bool) -> None:
         """Before queueing: a new queue isn't a skip of the old one, and remember who it's for."""
@@ -249,7 +277,8 @@ class MusicTools:
             self.memory.queue_audience = "others" if for_others else "me"
 
     async def play_playlist(self, name: str | int, mode: str = "replace", rooms: str | list[str] | None = None,
-                            shuffle: bool = False, for_others: bool = False) -> dict[str, Any]:
+                            shuffle: bool = False, for_others: bool = False,
+                            genre: str | None = None) -> dict[str, Any]:
         """Play a saved playlist. Its tracks are already known, so this needs no searching.
 
         Tracks saved under another music service (after switching service)
@@ -261,6 +290,7 @@ class MusicTools:
             rooms: Room names, or None for the default.
             shuffle: Play the tracks in random order.
             for_others: The music is for other people; see ``play_tracks``.
+            genre: The genre of the set; see ``play_tracks``.
 
         Returns:
             What was queued (the first few titles) and the total length.
@@ -300,6 +330,7 @@ class MusicTools:
             raise ToolError(f"None of the tracks in '{playlist['name']}' could be found in the catalogue.")
 
         out = await self._queue(items, mode, rooms, for_others)
+        await self._set_genre(genre)
         shown = 8
         more = len(out["tracks"]) - shown
         return {"playlist": playlist["name"], **out, "shuffled": shuffle,
@@ -321,8 +352,8 @@ class MusicTools:
             raise ToolError(f"No playlist called '{name}'. Saved playlists: {', '.join(names) or 'none yet'}.")
         return playlist
 
-    async def play_item(self, ref: str, mode: str = "replace",
-                        rooms: str | list[str] | None = None, for_others: bool = False) -> dict[str, Any]:
+    async def play_item(self, ref: str, mode: str = "replace", rooms: str | list[str] | None = None,
+                        for_others: bool = False, genre: str | None = None) -> dict[str, Any]:
         """Play a search result (album, playlist or track) by its ref.
 
         Args:
@@ -330,6 +361,7 @@ class MusicTools:
             mode: ``"replace"``, ``"append"`` or ``"next"``.
             rooms: Room names, or None for the default.
             for_others: The music is for other people; see ``play_tracks``.
+            genre: The genre of the set; see ``play_tracks``.
 
         Returns:
             What was queued and where.
@@ -346,6 +378,8 @@ class MusicTools:
         item = MediaItem(provider, kind, item_id, title=ref)
         self._starting(mode, for_others)
         result = await self._run(self.player.play, [item], rooms, mode)
+        await self._set_genre(genre)
+        await self._music_wanted()
         return {"queued": ref, "kind": kind, "mode": mode, "rooms": result.rooms, "volume": result.volume}
 
     # ------------------------------------------------------------ control
@@ -356,14 +390,24 @@ class MusicTools:
             action: ``"pause"``, ``"resume"``, ``"skip"`` or ``"stop"``.
 
         Returns:
-            ``{"done": action}``.
+            ``{"done": action}``, with a note when the day plan now stays quiet.
+            Stopping or pausing (by anyone but the orchestrator) keeps the
+            orchestrator from starting music for a few hours; resuming ends that.
         """
         actions = {"pause": self.player.pause, "resume": self.player.resume,
                    "skip": self.player.skip, "stop": self.player.stop}
         if action not in actions:
             raise ToolError(f"action must be one of {sorted(actions)}")
         await self._run(actions[action])
-        return {"done": action}
+        out: dict[str, Any] = {"done": action}
+        if self.memory and self.source != "auto":
+            if action in ("pause", "stop"):
+                await asyncio.to_thread(self.memory.start_quiet, self.source)
+                out["note"] = ("If the day plan is on, it won't start music again for a few hours "
+                               "(asking for music ends that).")
+            elif action == "resume":
+                await self._music_wanted()
+        return out
 
     async def set_volume(self, level: int | None = None, change: int | None = None,
                          room: str | None = None) -> dict[str, Any]:
@@ -464,6 +508,31 @@ class MusicTools:
             raise ToolError(str(exc)) from exc
         target = {"track": f"{title} - {artist}", "artist": artist, "general": note}[about]
         return {"saved": True, "id": fid, "sentiment": sentiment, "about": about, "target": target}
+
+    async def suggest_playlist(self, idea: str, why: str) -> dict[str, Any]:
+        """Leave a note in the curator's notebook: this kind of request deserves a saved playlist.
+
+        The same idea is noted only once, so asking again is harmless.
+
+        Args:
+            idea: What the playlist would be for, e.g. ``"bossa nova for cooking"``.
+            why: The evidence, e.g. ``"bossa nova asked for 4 times in 30 days, no playlist fits"``.
+
+        Returns:
+            Whether a note was saved, or that the idea was already noted.
+
+        Raises:
+            ToolError: Memory is off, or the idea is empty.
+        """
+        if not self.memory:
+            raise ToolError("Memory is turned off; notes cannot be saved.")
+        topic = f"playlist idea: {(idea or '').strip()}"
+        if not (idea or "").strip():
+            raise ToolError("Say what the playlist would be for.")
+        if await asyncio.to_thread(self.memory.dj_note_exists, topic):
+            return {"saved": False, "already_noted": True, "idea": idea}
+        nid = await asyncio.to_thread(self.memory.add_note, (why or "").strip() or idea, topic, "dj")
+        return {"saved": True, "note_id": nid, "idea": idea}
 
 
 def _item_dict(item: MediaItem) -> dict[str, Any]:

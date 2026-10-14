@@ -68,6 +68,31 @@ class Database:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
                 self._conn.commit()
 
+    def widen_check(self, table: str, old: str, new: str) -> bool:
+        """Rebuild a table whose CHECK constraint changed (SQLite can't alter one in place).
+
+        Every row is kept. Used when a newer version allows more values, e.g.
+        a new agent role.
+
+        Args:
+            table: Table name (ours, never user input).
+            old: Text of the old constraint's value list, e.g. ``"('dj', 'curator')"``.
+            new: Its replacement, e.g. ``"('dj', 'curator', 'orchestrator')"``.
+
+        Returns:
+            True if the table was rebuilt (False if it already had ``new``).
+        """
+        sql = self.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,))[0]["sql"]
+        if new in sql or old not in sql:
+            return False
+        with self.transaction() as conn:
+            conn.execute("BEGIN")
+            conn.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+            conn.execute(sql.replace(old, new))
+            conn.execute(f"INSERT INTO {table} SELECT * FROM {table}_old")
+            conn.execute(f"DROP TABLE {table}_old")
+        return True
+
     def insert(self, table: str, row: dict[str, Any]) -> int:
         """Insert one row (table and column names are ours, never user input); return its id."""
         cols = ", ".join(row)

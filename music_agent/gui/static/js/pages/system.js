@@ -1,7 +1,9 @@
-// Health of the moving parts: Discord bot (start/stop), agent, safety limits, and the live log.
+// Health of the moving parts: Discord bot (start/stop), each agent's model, safety limits, and the live log.
 
 import { api } from "../api.js";
 import { attempt, every, h, icon } from "../ui.js";
+
+const ROLE_LABELS = { dj: "DJ", curator: "Curator", orchestrator: "Orchestrator" };
 
 const BOT_LABELS = {
   online: "Online", connecting: "Connecting…", not_configured: "Not set up", error: "Error", stopped: "Stopped", off: "Off",
@@ -25,6 +27,7 @@ export default {
     async function loadStatus() {
       const s = await api("/status").catch(() => null);
       if (!s) return;
+      if (document.activeElement?.tagName === "SELECT" && cards.contains(document.activeElement)) return; // mid-choice
       const bot = s.bot;
       const running = bot.state === "online" || bot.state === "connecting";
       cards.replaceChildren(
@@ -35,10 +38,7 @@ export default {
           running
             ? h("button", { class: "btn danger", onclick: () => botAction("stop") }, "Stop bot")
             : h("button", { class: "btn primary", onclick: () => botAction("start") }, "Start bot")),
-        kvCard("Agent", {
-          Model: s.agent.model,
-          "Music service": s.agent.service,
-        }),
+        agentCard(s.agent, setModel),
         kvCard("Safety (enforced in code)", {
           "Max volume": s.safety.max_volume,
           "Volume cap now": s.safety.volume_cap_now,
@@ -51,6 +51,11 @@ export default {
           "Playback watcher": s.watcher ? "running" : "stopped",
           "Log file": s.log_file || "none",
         }));
+    }
+
+    async function setModel(role, model) {
+      await attempt(() => api(`/agents/${role}/model`, { method: "PUT", body: { model: model || null } }));
+      loadStatus();
     }
 
     async function botAction(action) {
@@ -71,6 +76,21 @@ export default {
     return () => { stopStatus(); stopLog(); };
   },
 };
+
+// Each agent's model as a dropdown; "Default" means the one in config.toml. Applies from the next request.
+function agentCard(agent, setModel) {
+  const pairs = Object.entries(agent.models).flatMap(([role, m]) => {
+    const select = h("select", { class: "input", "aria-label": `${ROLE_LABELS[role] || role} model`,
+                                 onchange: (e) => setModel(role, e.target.value) },
+      h("option", { value: "" }, `Default (${m.default})`),
+      agent.choices.map((c) => h("option", { value: c }, c)));
+    select.value = m.chosen ? m.model : "";
+    return [h("dt", {}, `${ROLE_LABELS[role] || role} model`), h("dd", {}, select)];
+  });
+  return h("div", { class: "card" }, h("h2", {}, "Agents"),
+    h("dl", { class: "kv" }, pairs, h("dt", {}, "Music service"), h("dd", {}, agent.service)),
+    h("p", { class: "muted" }, "A new model applies from each conversation's next request."));
+}
 
 function kvCard(title, pairs) {
   return h("div", { class: "card" }, h("h2", {}, title),

@@ -5,13 +5,28 @@ agent picks real tracks, finds them on Qobuz and plays them on your Sonos
 speakers. It considers the time of day, weather and what you've liked or
 skipped before, and learns from your feedback.
 
-There are two agents with different jobs:
+There are three agents with different jobs:
 
 - the **DJ** plays music and controls playback (Discord, the GUI's Now
-  playing page, the terminal);
+  playing page, the terminal). It picks one genre per request and chooses
+  within it by your taste, keeps to that genre for follow-ups for about an
+  hour, now and then plays a whole celebrated album, and leaves the curator a
+  note when a kind of request comes up often enough to deserve a playlist;
 - the **curator** shapes your taste: it saves what you tell it ("I'm done with
-  Coldplay"), runs listening quizzes, and builds saved playlists the DJ can play
-  in one step (the GUI's Chat page, or `chat --curator`).
+  Coldplay"), runs listening quizzes, builds saved playlists the DJ can play
+  in one step, and reviews and edits your day plan (the GUI's Chat page, or
+  `chat --curator`);
+- the **orchestrator** runs your day by itself: it follows `day_plan.toml`, a
+  rough outline of the music you want when (wake-up, focus, dinner,
+  wind-down...), reads your taste, and asks the DJ for a fitting style. Code
+  checks the speakers every few minutes and only wakes it when something needs
+  doing (nothing playing, the queue running out, a new part of the day). It
+  never stops music or changes the volume, and after you stop or pause the
+  music (from Discord, the GUI or the Sonos app) it stays quiet for a few
+  hours; asking for music again ends that early.
+
+The DJ and orchestrator run on Sonnet and the curator (used less often) on
+Opus by default (`[agent]` in `config.toml`); the System page can switch each one.
 
 ```
 GUI / Discord / terminal ──► Claude agent: DJ or curator (Agent SDK, your Claude subscription)
@@ -55,8 +70,9 @@ python -m music_agent.cli --help      # direct control, no AI (or: dj)
 ## Using it
 
 **GUI** (`python -m music_agent.gui`) opens http://127.0.0.1:8765 and also
-starts the Discord bot, so this one command runs everything. (Don't run
-`dj-bot` at the same time, or two bots will answer.) Pages:
+starts the Discord bot and the orchestrator, so this one command runs
+everything. (Don't run `dj-bot` at the same time, or two bots will answer and
+two orchestrators will run the day. `--no-bot` starts neither.) Pages:
 
 - **Now playing**: cover art, progress, play/pause/skip/stop, volume (up to the
   safety cap), 👍 / 👎, the queue, and your chat with the DJ (separate from
@@ -75,6 +91,13 @@ starts the Discord bot, so this one command runs everything. (Don't run
   What it concludes in a quiz becomes a tentative *finding* until enough
   samples back it (see Learning below). It can also look up a track's year,
   tempo, style tags and popularity.
+- **Day**: the day plan and the orchestrator. Turn it on or off, see today's
+  parts of the day (the current one highlighted), edit wake-up and bedtime
+  (weekdays and weekend), how long to stay quiet after a stop, and each part of
+  the day: when it starts (`14:00`, or relative like `wake+1h`, `sleep-90m`),
+  which days, the mood in your words, rooms, or "quiet" for no music. "Check
+  now" runs a check immediately; "Recent activity" shows what it did and why.
+  It ships turned **off**: check the times, then switch it on.
 - **Playlists**: saved playlists. Play, shuffle or queue them; rename them and
   edit the description (the DJ reads it to decide when a playlist fits); add
   or remove tracks.
@@ -96,8 +119,8 @@ starts the Discord bot, so this one command runs everything. (Don't run
   to change it (lists for fixed choices, date pickers for times), add rows, ×
   deletes one. The same rules as everywhere else apply, so an edit can't leave
   something the agents can't read.
-- **System**: Discord bot status with start/stop, agent and safety settings,
-  and the live log.
+- **System**: Discord bot status with start/stop, each agent's model (applies
+  from its next request), safety settings, and the live log.
 
 `--no-bot` runs only the GUI, `--no-browser` skips opening a tab, and `[gui]`
 in `config.toml` sets the port. The GUI has no login, so it only listens on
@@ -191,7 +214,8 @@ those tracks and artists. On top of the scores:
   and can *reset* what was learned about an artist or track: older feedback
   and listens are then ignored but kept in the history, so a reset can be undone.
 - The curator's *notebook* is its memory between conversations; notes marked
-  for the DJ reach it too.
+  for the DJ reach it too. The DJ writes playlist ideas there (author "dj")
+  when a genre is requested often and no saved playlist fits.
 - Every weight and threshold is a setting on the Taste page (`scoring.py` has
   the defaults).
 

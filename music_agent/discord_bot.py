@@ -251,7 +251,7 @@ class MusicBot(discord.Client):
     async def setup_hook(self) -> None:
         """Start the agent before connecting to Discord."""
         await self.agent.start()
-        log.info("Agent started (model: %s)", self.app.config.agent.model)
+        log.info("Agent started (model: %s)", self.agent.model)
 
     async def close(self) -> None:
         """Stop the agent, then disconnect (the runtime owns the playback watcher)."""

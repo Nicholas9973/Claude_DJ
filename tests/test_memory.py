@@ -137,12 +137,22 @@ def test_old_database_files_get_new_columns(tmp_path):
     old = sqlite3.connect(path)
     old.execute("CREATE TABLE requests (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, prompt TEXT, reply TEXT, "
                 "model TEXT, cost_usd REAL, part_of_day TEXT, weekday TEXT, weather TEXT)")
+    old.execute("CREATE TABLE notebook (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, "
+                "author TEXT NOT NULL CHECK (author IN ('curator', 'you')), topic TEXT, text TEXT NOT NULL, "
+                "for_dj INTEGER NOT NULL DEFAULT 0 CHECK (for_dj IN (0, 1)))")
+    old.execute("INSERT INTO notebook (ts, author, text) VALUES ('2026-10-01T10:00:00', 'you', 'old note')")
     old.commit()
     old.close()
     m = Memory(path)
     m.start_request("hi", "sonnet", agent="curator")
-    assert m.db.rows("requests")["rows"][0][-1] == "curator"
+    rows = m.db.rows("requests")
+    assert rows["rows"][0][rows["columns"].index("agent")] == "curator"
+    # The notebook was rebuilt to allow notes by the DJ, keeping the old ones.
+    m.add_note("bossa nova asked for 4 times", "playlist idea: bossa nova", author="dj")
+    assert [n["author"] for n in m.notes()] == ["dj", "you"]
+    assert "dj" in m.db.column_info("notebook")[2]["choices"]
     m.close()
+    Memory(path).close()   # opening it again doesn't migrate twice
 
 
 def test_scores_show_where_they_came_from():

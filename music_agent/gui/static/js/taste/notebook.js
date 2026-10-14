@@ -30,7 +30,7 @@ export function notebookCard(notes, reload) {
         body.value = n.text;
         body.onblur = () => { if (body.value.trim() && body.value !== n.text) patch(n, { text: body.value.trim() }, "Note saved"); };
         return h("div", { class: "feedback-row top" },
-          h("span", { class: `chip ${n.author === "you" ? "good" : ""}` }, n.author === "you" ? "you" : "curator"),
+          h("span", { class: `chip ${n.author === "you" ? "good" : ""}` }, n.author === "you" ? "you" : n.author === "dj" ? "DJ" : "curator"),
           h("div", { class: "what" },
             h("div", { class: "edit-line" },
               inlineInput(n.topic || "", (v) => patch(n, { topic: v.trim() || null }, "Topic saved"),

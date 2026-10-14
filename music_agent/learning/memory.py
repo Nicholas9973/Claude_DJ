@@ -22,8 +22,9 @@ What shapes the profile, from strongest to most subtle:
   guests: ``audience = 'others'``, or *guest mode*) are kept in the history
   but don't shape the taste.
 - The *notebook* holds notes by the curator (what it asked in quizzes, what it
-  noticed) and by you. The curator reads them all; notes marked ``for_dj``
-  reach the DJ too, alongside the notes in your feedback.
+  noticed), by you, and by the DJ (requests common enough to deserve a saved
+  playlist). The curator reads them all; notes marked ``for_dj`` reach the DJ
+  too, alongside the notes in your feedback.
 - *Findings* are conclusions the curator draws from quizzes ("dislikes K-pop"),
   each with its evidence: the samples played and how you reacted. A finding
   stays *tentative* (a soft hint for the DJ) until the evidence is enough:
@@ -87,9 +88,9 @@ CREATE TABLE IF NOT EXISTS adjustments (      -- hand-made changes to a score; n
     ignore_before TEXT,                       -- feedback and listens up to this time are ignored
     note TEXT
 );
-CREATE TABLE IF NOT EXISTS notebook (         -- notes by the curator and you; the curator reads them all
+CREATE TABLE IF NOT EXISTS notebook (         -- notes by the curator, you and the DJ; the curator reads them all
     id INTEGER PRIMARY KEY, ts TEXT NOT NULL,
-    author TEXT NOT NULL CHECK (author IN ('curator', 'you')),
+    author TEXT NOT NULL CHECK (author IN ('curator', 'you', 'dj')),
     topic TEXT,                               -- e.g. "quiz: 70s soul"
     text TEXT NOT NULL,
     for_dj INTEGER NOT NULL DEFAULT 0 CHECK (for_dj IN (0, 1))   -- 1: the DJ sees it too, with your notes
@@ -112,6 +113,16 @@ CREATE TABLE IF NOT EXISTS finding_evidence ( -- the samples behind a finding, a
     popularity TEXT CHECK (popularity IN ('hit', 'well known', 'known', 'deep cut')),   -- when known
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS agent_models (     -- the Claude model chosen for each agent on the System page
+    id INTEGER PRIMARY KEY, ts TEXT NOT NULL,
+    role TEXT NOT NULL UNIQUE CHECK (role IN ('dj', 'curator', 'orchestrator')),
+    model TEXT NOT NULL CHECK (model IN ('haiku', 'sonnet', 'opus'))
+);
+CREATE TABLE IF NOT EXISTS quiet_requests (   -- you stopped or paused the music: the orchestrator stays quiet a while
+    id INTEGER PRIMARY KEY, ts TEXT NOT NULL,
+    source TEXT,                              -- "dj", "gui", "speakers" (the Sonos app), ...
+    ended TEXT                                -- set when you start music again (or press Resume on the Day page)
+);
 CREATE TABLE IF NOT EXISTS taste_settings (   -- your values for the tunables in scoring.TUNING
     id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, value REAL NOT NULL, ts TEXT NOT NULL
 );
@@ -124,6 +135,10 @@ PREFERENCE_KINDS = ("artist", "track", "genre", "rule")
 FINDING_KINDS = ("genre", "artist", "era", "mood", "other")
 FINDING_STATUSES = ("tentative", "confirmed", "dropped")
 ADJUSTMENT_KINDS = ("artist", "track")
+NOTE_AUTHORS = ("curator", "you", "dj")
+DAY_PLAN_PREFIX = "[Day plan]"        # how the orchestrator's requests to the DJ start
+AGENT_ROLES = ("dj", "curator", "orchestrator")
+AGENT_MODELS = ("haiku", "sonnet", "opus")   # the choices on the System page (config.toml takes any model id)
 AUDIENCES = ("me", "others")          # who music was played for; "others" doesn't train the taste
 FREQUENCIES = ("regular", "sometimes", "rarely", "on_request")   # how often a love should come up
 FREQUENCY_WORDS = {                   # how the profile words it for Claude (wording matters: see CLAUDE.md)
@@ -163,11 +178,16 @@ class Memory:
         self.db.add_schema(SCHEMA)
         # Small migrations for files made by older versions.
         self.db.ensure_column("requests", "agent", "TEXT")   # added with the curator
+        self.db.ensure_column("requests", "genre", "TEXT")   # the genre the DJ chose for the set
+        if self.db.widen_check("notebook", "('curator', 'you')", "('curator', 'you', 'dj')"):
+            log.info("Notebook table updated to allow notes by the DJ.")
+        self.db.widen_check("agent_models", "('dj', 'curator')", "('dj', 'curator', 'orchestrator')")
         self.db.ensure_column("plays", "source", "TEXT")     # "dj", "curator" or "gui"
         audience = "TEXT CHECK (audience IN ('me', 'others'))"
         self.db.ensure_column("plays", "audience", audience)
         self.db.ensure_column("listens", "source", "TEXT")   # copied from the play it belongs to
         self.db.ensure_column("listens", "audience", audience)
+        self.db.ensure_column("listens", "genre", "TEXT")    # the genre of the DJ's set it was part of
         self.db.ensure_column("feedback", "source", "TEXT")  # "dj", "curator" (a quiz) or "gui"
         self.db.ensure_column("preferences", "frequency",
                               "TEXT CHECK (frequency IN ('regular', 'sometimes', 'rarely', 'on_request'))")
@@ -184,6 +204,7 @@ class Memory:
         self.db.add_check("taste_settings", lambda r: check_tuning(r["key"], r["value"]))
         self.db.add_check("notebook", lambda r: _check_note(r["author"], r["text"]))
         self.db.add_check("findings", self._check_finding_row)
+        self.db.add_check("quiet_requests", lambda r: _check_time(r["ended"], "ended"))
         self.db.add_check("finding_evidence", lambda r: _check_evidence(r["artist"]))
 
     # ------------------------------------------------------------ helpers
@@ -211,18 +232,18 @@ class Memory:
         return fade(age_days, half_life_days)
 
     def _play_for(self, title: str | None, ts: str) -> dict[str, Any] | None:
-        """The latest play of this title in the hours up to ``ts``: who queued it, and for whom."""
+        """The latest play of this title in the hours up to ``ts``: who queued it, for whom, and the set's genre."""
         try:
             until = datetime.fromisoformat(ts)
         except (TypeError, ValueError):
             return None
         since = (until - timedelta(hours=LISTEN_MATCH_HOURS)).isoformat(timespec="seconds")
-        rows = self._query("SELECT p.title, p.source, p.audience, r.agent FROM plays p "
+        rows = self._query("SELECT p.title, p.source, p.audience, r.agent, r.genre FROM plays p "
                            "LEFT JOIN requests r ON r.id = p.request_id "
                            "WHERE p.ts BETWEEN ? AND ? ORDER BY p.ts DESC, p.id DESC", (since, ts))
         for r in rows:   # titles compared loosely: the speaker and the catalogue may spell them differently
             if norm(r["title"]) == norm(title):
-                return {"source": r["source"] or r["agent"], "audience": r["audience"]}
+                return {"source": r["source"] or r["agent"], "audience": r["audience"], "genre": r["genre"]}
         return None
 
     def _match_old_listens(self) -> None:
@@ -334,7 +355,8 @@ class Memory:
 
         The listen is linked to the play it came from (if an agent or the GUI
         queued it), so quiz samples and music for others can be left out of
-        the taste.
+        the taste, and so it carries the genre the DJ chose for that set
+        (none for whole albums or music started elsewhere).
 
         Args:
             title: Track title.
@@ -354,7 +376,8 @@ class Memory:
             audience = "me"
         return self._insert("listens", {**stamp, "title": title, "artist": artist, "outcome": outcome,
                                         "listened_s": listened_s, "duration_s": duration_s,
-                                        "source": play["source"] if play else None, "audience": audience})
+                                        "source": play["source"] if play else None, "audience": audience,
+                                        "genre": play["genre"] if play else None})
 
     def record_feedback(self, sentiment: int, scope: str, title: str | None = None,
                         artist: str | None = None, note: str | None = None,
@@ -592,7 +615,7 @@ class Memory:
         Args:
             text: The note.
             topic: A short heading, e.g. ``"quiz: 70s soul"``.
-            author: ``"curator"`` or ``"you"``.
+            author: ``"curator"``, ``"you"`` or ``"dj"``.
             for_dj: Show it to the DJ too.
 
         Returns:
@@ -634,6 +657,149 @@ class Memory:
     def notes(self, limit: int = 100) -> list[dict[str, Any]]:
         """Notebook entries, newest first."""
         return [dict(r) for r in self._query("SELECT * FROM notebook ORDER BY ts DESC, id DESC LIMIT ?", (limit,))]
+
+    def dj_note_exists(self, topic: str) -> bool:
+        """True if the DJ already left a note with this topic (compared loosely)."""
+        return any(norm(r["topic"] or "") == norm(topic)
+                   for r in self._query("SELECT topic FROM notebook WHERE author = 'dj'"))
+
+    # ------------------------------------------------------------ genre of the set
+    def set_request_genre(self, request_id: int, genre: str) -> None:
+        """Remember the genre the DJ chose for a request's music.
+
+        Args:
+            request_id: Id from ``start_request``.
+            genre: E.g. ``"bossa nova"``.
+        """
+        self.db.execute("UPDATE requests SET genre = ? WHERE id = ?", (genre.strip() or None, request_id))
+
+    def current_genre(self, minutes: float = 60) -> dict[str, Any] | None:
+        """The genre of the DJ's latest set, if one was chosen within ``minutes``.
+
+        Args:
+            minutes: How long a genre holds after the last request that chose it.
+
+        Returns:
+            ``{"genre", "since", "for_minutes", "last_request"}``, or None.
+            ``since`` is when the DJ started on this genre: the first of the
+            latest requests that all chose it.
+        """
+        now = self._now()
+        rows = self._query("SELECT ts, prompt, genre FROM requests WHERE ts >= ? AND genre IS NOT NULL "
+                           "AND COALESCE(agent, 'dj') = 'dj' ORDER BY ts DESC, id DESC LIMIT 50",
+                           ((now - timedelta(hours=12)).isoformat(timespec="seconds"),))
+        if not rows or rows[0]["ts"] < (now - timedelta(minutes=minutes)).isoformat(timespec="seconds"):
+            return None
+        started = rows[0]["ts"]
+        for r in rows[1:]:
+            if norm(r["genre"]) != norm(rows[0]["genre"]):
+                break
+            started = r["ts"]
+        try:
+            for_minutes = max(0, round((now - datetime.fromisoformat(started)).total_seconds() / 60))
+        except ValueError:      # a bad time typed on the Database page
+            for_minutes = 0
+        return {"genre": rows[0]["genre"], "since": started[11:16], "for_minutes": for_minutes,
+                "last_request": rows[0]["prompt"]}
+
+    def common_genres(self, days: int = 30, at_least: int = 3, limit: int = 8) -> list[dict[str, Any]]:
+        """Genres the DJ chose for several requests lately, most frequent first.
+
+        Args:
+            days: How far back to look.
+            at_least: Fewest requests for a genre to be listed.
+            limit: Most genres to list.
+
+        Returns:
+            ``{"genre", "requests"}`` each (genre names compared loosely).
+        """
+        since = (self._now() - timedelta(days=days)).isoformat(timespec="seconds")
+        counts: dict[str, dict[str, Any]] = {}
+        for r in self._query("SELECT genre FROM requests WHERE ts >= ? AND genre IS NOT NULL "
+                             "AND COALESCE(agent, 'dj') = 'dj' ORDER BY ts DESC", (since,)):
+            c = counts.setdefault(norm(r["genre"]), {"genre": r["genre"], "requests": 0})
+            c["requests"] += 1
+        common = [c for c in counts.values() if c["requests"] >= at_least]
+        return sorted(common, key=lambda c: -c["requests"])[:limit]
+
+    # ------------------------------------------------------------ agent models
+    def agent_model(self, role: str) -> str | None:
+        """The model chosen for an agent on the System page, or None to use config.toml."""
+        rows = self._query("SELECT model FROM agent_models WHERE role = ?", (role,))
+        return rows[0]["model"] if rows else None
+
+    def set_agent_model(self, role: str, model: str | None) -> None:
+        """Choose the model for an agent, or go back to the one in config.toml.
+
+        Args:
+            role: One of ``AGENT_ROLES``.
+            model: One of ``AGENT_MODELS``, or None for the config default.
+
+        Raises:
+            ValueError: Unknown role or model.
+        """
+        if role not in AGENT_ROLES:
+            raise ValueError(f"role must be one of {', '.join(AGENT_ROLES)}")
+        if model is None:
+            self.db.execute("DELETE FROM agent_models WHERE role = ?", (role,))
+            return
+        if model not in AGENT_MODELS:
+            raise ValueError(f"model must be one of {', '.join(AGENT_MODELS)}")
+        self.db.execute("INSERT INTO agent_models (ts, role, model) VALUES (?, ?, ?) "
+                        "ON CONFLICT(role) DO UPDATE SET model = excluded.model, ts = excluded.ts",
+                        (self._stamp()["ts"], role, model))
+
+    # ------------------------------------------------------------ quiet after a stop (orchestrator)
+    def start_quiet(self, source: str | None = None) -> None:
+        """You stopped or paused the music: the orchestrator leaves it off for a while.
+
+        Args:
+            source: Where it was stopped: ``"dj"``, ``"gui"``, ``"speakers"``...
+        """
+        self._insert("quiet_requests", {"ts": self._stamp()["ts"], "source": source})
+
+    def end_quiet(self) -> bool:
+        """You started music again: the orchestrator may carry on.
+
+        Returns:
+            True if a quiet period was ended.
+        """
+        return self.db.execute("UPDATE quiet_requests SET ended = ? WHERE ended IS NULL",
+                               (self._stamp()["ts"],)) > 0
+
+    def quiet_since(self) -> datetime | None:
+        """When the latest quiet period began, if it hasn't been ended (unreadable times are ignored)."""
+        for r in self._query("SELECT ts FROM quiet_requests WHERE ended IS NULL ORDER BY ts DESC, id DESC LIMIT 1"):
+            try:
+                return datetime.fromisoformat(r["ts"])
+            except ValueError:
+                return None
+        return None
+
+    def quiet_history(self, days: int = 14) -> list[dict[str, Any]]:
+        """When the music was stopped lately, newest first: ``{"date", "part_of_day", "from"}``."""
+        since = (self._now() - timedelta(days=days)).isoformat(timespec="seconds")
+        out = []
+        for r in self._query("SELECT ts, source FROM quiet_requests WHERE ts >= ? ORDER BY ts DESC, id DESC LIMIT 30",
+                             (since,)):
+            try:
+                hour = datetime.fromisoformat(r["ts"]).hour
+            except ValueError:
+                continue
+            out.append({"date": r["ts"][:16].replace("T", " "), "part_of_day": part_of_day(hour),
+                        "from": r["source"] or "?"})
+        return out
+
+    def last_play(self) -> dict[str, Any] | None:
+        """The latest queued track: ``{"ts", "source", "title", "artist"}``, or None."""
+        rows = self._query("SELECT ts, source, title, artist FROM plays ORDER BY ts DESC, id DESC LIMIT 1")
+        return dict(rows[0]) if rows else None
+
+    def recent_requests(self, agent: str, limit: int = 15) -> list[dict[str, Any]]:
+        """An agent's latest requests and replies, newest first: ``{"date", "asked", "reply"}``."""
+        return [{"date": r["ts"][:16].replace("T", " "), "asked": r["prompt"], "reply": r["reply"]}
+                for r in self._query("SELECT ts, prompt, reply FROM requests WHERE agent = ? "
+                                     "ORDER BY ts DESC, id DESC LIMIT ?", (agent, limit))]
 
     # ------------------------------------------------------------ findings
     def add_finding(self, kind: str, subject: str, sentiment: int, statement: str,
@@ -857,7 +1023,7 @@ class Memory:
         return [dict(r) for r in self._query("SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (limit,))]
 
     def listening_history(self, days: int = 14, artist: str | None = None, limit: int = 40) -> dict[str, Any]:
-        """What actually happened lately: tracks finished and skipped, and what the DJ was asked for.
+        """What actually happened lately: tracks finished and skipped, per artist and genre, and what was asked for.
 
         Args:
             days: How far back to look.
@@ -866,31 +1032,45 @@ class Memory:
 
         Returns:
             ``listens`` (newest first: date, part of day, outcome, track, how
-            much was heard, and ``context`` "quiz sample" or "for others" when
-            it doesn't count towards taste), ``by_artist`` (completed/skipped
-            counts of your own listening, most skipped first) and
-            ``dj_requests`` (what you asked the DJ for).
+            much was heard, the set's ``genre``, and ``context`` "quiz sample"
+            or "for others" when it doesn't count towards taste), ``by_artist``
+            and ``by_genre`` (completed/skipped counts of your own listening,
+            most skipped first), ``genres_chosen`` (how often each genre was
+            chosen for a set, for your requests and for the day plan), and
+            ``dj_requests`` (what you asked the DJ for, and the genre it chose).
         """
         since = (self._now() - timedelta(days=days)).isoformat(timespec="seconds")
         rows = [r for r in self._query("SELECT * FROM listens WHERE ts >= ? ORDER BY ts DESC, id DESC", (since,))
                 if artist is None or norm(r["artist"]) == norm(artist)]
         counts: dict[str, dict[str, Any]] = {}
+        genres: dict[str, dict[str, Any]] = {}
         for r in rows:
             if _listen_context(r) is None:
                 c = counts.setdefault(norm(r["artist"]), {"artist": r["artist"] or "?", "completed": 0, "skipped": 0})
                 c[r["outcome"]] += 1
+                if r["genre"]:
+                    g = genres.setdefault(norm(r["genre"]), {"genre": r["genre"], "completed": 0, "skipped": 0})
+                    g[r["outcome"]] += 1
         listens = [{k: v for k, v in {
                        "date": r["ts"][:16].replace("T", " "), "part_of_day": r["part_of_day"],
                        "outcome": r["outcome"], "track": f"{r['title']} - {r['artist'] or '?'}",
                        "heard": f"{round(100 * r['listened_s'] / r['duration_s'])}%"
                        if r["listened_s"] is not None and r["duration_s"] else None,
-                       "context": _listen_context(r)}.items() if v is not None}
+                       "genre": r["genre"] or None, "context": _listen_context(r)}.items() if v is not None}
                    for r in rows[:limit]]
-        requests = [{"date": r["ts"][:16].replace("T", " "), "asked": r["prompt"]} for r in self._query(
-            "SELECT ts, prompt FROM requests WHERE ts >= ? AND COALESCE(agent, 'dj') = 'dj' "
+        requests = [{"date": r["ts"][:16].replace("T", " "), "asked": r["prompt"],
+                     **({"genre": r["genre"]} if r["genre"] else {})} for r in self._query(
+            "SELECT ts, prompt, genre FROM requests WHERE ts >= ? AND COALESCE(agent, 'dj') = 'dj' "
             "ORDER BY ts DESC, id DESC LIMIT ?", (since, limit))]
+        chosen: dict[str, dict[str, Any]] = {}
+        for r in self._query("SELECT prompt, genre FROM requests WHERE ts >= ? AND genre IS NOT NULL "
+                             "AND COALESCE(agent, 'dj') = 'dj'", (since,)):
+            c = chosen.setdefault(norm(r["genre"]), {"genre": r["genre"], "by_you": 0, "by_day_plan": 0})
+            c["by_day_plan" if (r["prompt"] or "").startswith(DAY_PLAN_PREFIX) else "by_you"] += 1
         return {"days": days, "listens": listens,
                 "by_artist": sorted(counts.values(), key=lambda c: (-c["skipped"], -c["completed"]))[:25],
+                "by_genre": sorted(genres.values(), key=lambda c: (-c["skipped"], -c["completed"]))[:25],
+                "genres_chosen": sorted(chosen.values(), key=lambda c: -(c["by_you"] + c["by_day_plan"]))[:25],
                 "dj_requests": requests}
 
     def taste_profile(self, part: str | None = None, recent_hours: int = 24) -> dict[str, Any]:
@@ -1251,10 +1431,19 @@ def _check_evidence(artist: str | None) -> None:
         raise ValueError("a sample needs its artist")
 
 
+def _check_time(value: str | None, name: str) -> None:
+    """Raise ValueError unless ``value`` is empty or a readable date and time."""
+    if value:
+        try:
+            datetime.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"{name} must be a date and time like 2026-10-14T09:30:00") from None
+
+
 def _check_note(author: str, text: str | None) -> None:
     """Raise ValueError unless this is a valid notebook entry."""
-    if author not in ("curator", "you"):
-        raise ValueError("a note's author is 'curator' or 'you'")
+    if author not in NOTE_AUTHORS:
+        raise ValueError("a note's author is 'curator', 'you' or 'dj'")
     if not (text or "").strip():
         raise ValueError("a note needs some text")
 

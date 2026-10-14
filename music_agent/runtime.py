@@ -1,9 +1,14 @@
 """The long-running service that every front-end shares.
 
 One ``Runtime`` owns the speakers, memory and playback watcher (via ``App``),
-the Discord bot, and any number of named conversations with Claude. The GUI
-and the Discord bot are just two ways of talking to it, so they see the same
-speakers and the same memory and never run two watchers.
+the Discord bot, the orchestrator (which follows the day plan), and any number
+of named conversations with Claude. The GUI and the Discord bot are just two
+ways of talking to it, so they see the same speakers and the same memory and
+never run two watchers.
+
+The orchestrator talks to two conversations of its own: ``"orchestrator"``
+(the agent that decides the style) and ``"auto-dj"`` (a DJ whose plays are
+recorded with source ``"auto"``, so they don't count as the person's choice).
 
 To add a new front-end, give it a ``Runtime`` and use ``conversation(name, role)``
 for its own chat with Claude, and ``tools`` / ``curator`` for direct, AI-free
@@ -27,10 +32,12 @@ from music_agent.agent.session import Event, MusicAgent
 from music_agent.agent.tools import MusicTools
 from music_agent.app import App
 from music_agent.discord_bot import BotRunner
+from music_agent.orchestrator import Orchestrator
 
 log = logging.getLogger(__name__)
 
-AgentFactory = Callable[..., MusicAgent]  # (app, role="dj") -> agent; MusicAgent itself fits
+AgentFactory = Callable[..., MusicAgent]  # (app, role="dj", **extras) -> agent; MusicAgent itself fits
+ORCHESTRATOR, AUTO_DJ = "orchestrator", "auto-dj"   # the orchestrator's own conversations
 HISTORY_LIMIT = 100  # messages kept per conversation for the GUI
 
 
@@ -133,6 +140,7 @@ class Runtime:
             validation the agent gets.
         curator: Direct taste and playlist editing (no Claude), as the curator does it.
         bot: The Discord bot's lifecycle.
+        orchestrator: Follows the day plan in the background (see ``start``).
         log_file: Where this process logs, if anywhere (shown in the GUI).
     """
 
@@ -144,6 +152,7 @@ class Runtime:
         self.tools.source = "gui"
         self.curator = CuratorTools(self.tools, app.trackinfo)
         self.bot = BotRunner(app, agent_factory)
+        self.orchestrator = Orchestrator(app, self._run_orchestrator)
         self.started_at = datetime.now()
         self.log_file: Path | None = None
         self._conversations: dict[str, Conversation] = {}
@@ -153,19 +162,46 @@ class Runtime:
 
         Args:
             name: Any label; each name is a separate chat with Claude.
-            role: Agent for a new conversation: ``"dj"`` or ``"curator"``.
+            role: Agent for a new conversation: ``"dj"``, ``"curator"`` or ``"orchestrator"``.
         """
         if name not in self._conversations:
-            self._conversations[name] = Conversation(name, self._agent_factory(self.app, role=role))
+            extras = {"ask_dj": self.ask_dj} if role == "orchestrator" else {}
+            agent = self._agent_factory(self.app, role=role, **extras)
+            if name == AUTO_DJ:
+                agent.tools.source = "auto"     # its plays aren't the person's choice, and it can't start a quiet
+            self._conversations[name] = Conversation(name, agent)
         return self._conversations[name]
 
-    async def start(self) -> None:
-        """Start background work (the playback watcher)."""
+    async def ask_dj(self, request: str) -> dict[str, Any]:
+        """Send the orchestrator's request to its DJ and collect what happened.
+
+        Returns:
+            ``{"reply", "steps", "error"}``.
+        """
+        return await _collect(self.conversation(AUTO_DJ, role="dj"), request)
+
+    async def _run_orchestrator(self, message: str) -> dict[str, Any]:
+        """Wake the orchestrator agent with a fresh conversation (and a fresh DJ), so each run stays cheap."""
+        orchestrator = self.conversation(ORCHESTRATOR, role="orchestrator")
+        await orchestrator.reset()
+        await self.conversation(AUTO_DJ, role="dj").reset()
+        return await _collect(orchestrator, message)
+
+    async def start(self, orchestrate: bool = True) -> None:
+        """Start background work: the playback watcher, and the orchestrator.
+
+        Args:
+            orchestrate: Also follow the day plan. Only one process should
+                (a test GUI started with ``--no-bot`` doesn't).
+        """
         if self.app.watcher:
             self.app.watcher.start()
+        if orchestrate:
+            self.orchestrator.start()
 
     async def stop(self) -> None:
-        """Stop the bot, the conversations and the watcher."""
+        """Stop the orchestrator, the bot, the conversations and the watcher."""
+        await self.orchestrator.stop()
         await self.bot.stop()
         for conv in self._conversations.values():
             with contextlib.suppress(Exception):
@@ -198,6 +234,21 @@ def event_to_dict(event: Event) -> dict[str, Any]:
         "turns": getattr(result, "num_turns", None),
         "error": getattr(result, "subtype", "error") if event.is_error else None,
     }
+
+
+async def _collect(conv: Conversation, text: str) -> dict[str, Any]:
+    """Ask a conversation something and gather the reply, one-line steps and any error."""
+    out: dict[str, Any] = {"reply": "", "steps": [], "error": None}
+    async for item in conv.ask(text):
+        if item["type"] in ("tool_call", "tool_result"):
+            out["steps"].append(item["summary"])
+        elif item["type"] == "text":
+            out["reply"] = f"{out['reply']}\n{item['text']}".strip()
+        elif item["type"] == "done" and item.get("error"):
+            out["error"] = item["error"]
+        elif item["type"] == "error":
+            out["error"] = item["message"]
+    return out
 
 
 def _now() -> str:

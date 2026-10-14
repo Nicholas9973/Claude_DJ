@@ -16,8 +16,13 @@ hosts = []
 discovery_timeout = 5
 
 [agent]
-# "sonnet" (default), "haiku" (faster, uses less of your credit) or "opus".
+# The DJ's model: "sonnet" (default), "haiku" (faster, uses less of your credit) or "opus".
 model = "sonnet"
+# The curator's model. It runs less often, so it gets the strongest one.
+# All three can also be changed on the GUI's System page (that choice wins over these).
+curator_model = "opus"
+# The orchestrator, which follows day_plan.toml and asks the DJ for music through the day.
+orchestrator_model = "sonnet"
 max_turns = 20
 # Remove ANTHROPIC_API_KEY from the agent's environment so it always uses your
 # Claude subscription login instead of paid API billing.

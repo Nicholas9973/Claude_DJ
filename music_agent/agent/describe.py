@@ -21,7 +21,8 @@ def describe_call(name: str, args: dict) -> str:
         more = f" +{len(tracks) - 3} more" if len(tracks) > 3 else ""
         rooms = f", rooms={args['rooms']}" if args.get("rooms") else ""
         target = f" '{args.get('name')}'" if name == "save_playlist" else ""
-        return f"{name}{target} [{args.get('mode', 'replace')}{rooms}] {len(tracks)} tracks: {first}{more}"
+        genre = f" ({args['genre']})" if args.get("genre") else ""
+        return f"{name}{target} [{args.get('mode', 'replace')}{rooms}] {len(tracks)} tracks{genre}: {first}{more}"
     if not args:
         return name
     return f"{name} {json.dumps(args, ensure_ascii=False)}"

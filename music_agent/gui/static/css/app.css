@@ -333,6 +333,33 @@ textarea.cell-input { min-width: 320px; resize: vertical; white-space: pre-wrap;
 .pager { display: flex; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 13px; }
 
 /* ------------------------------------------------------------ system */
+/* Day page */
+.day-toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-weight: 600; cursor: pointer; }
+.day-toggle input, .day-quiet input { width: 18px; height: 18px; accent-color: var(--accent); }
+.card .kv + .btn { margin-top: 16px; }
+.day-today { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.day-today li { display: flex; gap: 12px; padding: 6px 10px; border-radius: 10px; }
+.day-today li.now { background: var(--surface-hover); outline: 1px solid var(--accent); }
+.day-time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 44px; }
+.day-settings { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); margin-bottom: 18px; }
+.day-field { display: grid; gap: 4px; font-size: 13px; }
+.day-field .input { padding: 8px 12px; border-radius: 10px; }
+.day-slots { display: grid; gap: 8px; }
+.day-slot { display: grid; gap: 8px; align-items: center; grid-template-columns: 130px 120px minmax(0, 1fr) 150px auto auto; }
+.day-slot .input { padding: 8px 12px; border-radius: 10px; width: 100%; min-width: 0; }
+.day-head { font-size: 12px; margin-bottom: 4px; }
+.day-quiet { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.day-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.day-history { display: grid; gap: 12px; }
+.day-event { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.day-event:last-child { border-bottom: 0; padding-bottom: 0; }
+.day-event details pre { margin-top: 6px; max-height: 220px; }
+@media (max-width: 900px) {
+  .day-slot { grid-template-columns: 1fr 1fr; }
+  .day-slot .day-mood { grid-column: 1 / -1; }
+  .day-head { display: none; }
+}
+
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 14px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }

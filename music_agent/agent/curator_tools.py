@@ -439,7 +439,7 @@ def _finding_dict(f: dict[str, Any]) -> dict[str, Any]:
 
 def _note_dict(n: dict[str, Any]) -> dict[str, Any]:
     """A notebook entry as the curator sees it."""
-    d = {"id": n["id"], "date": n["ts"][:10], "by": "person" if n["author"] == "you" else "curator",
+    d = {"id": n["id"], "date": n["ts"][:10], "by": {"you": "person", "dj": "dj"}.get(n["author"], "curator"),
          "text": n["text"]}
     if n["topic"]:
         d["topic"] = n["topic"]

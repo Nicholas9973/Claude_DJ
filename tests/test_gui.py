@@ -37,7 +37,7 @@ def gui():
     app = App(player.config, player, provider, memory=memory, playlists=PlaylistStore(memory.db))
     agents = []
 
-    def factory(a, role="dj"):
+    def factory(a, role="dj", **extras):
         tools = MusicTools(a.config, a.player, a.provider, now_fn=DAY, memory=a.memory, playlists=a.playlists)
         agent = ScriptedAgent(tools, music_script, role=role)
         agents.append(agent)
@@ -71,7 +71,8 @@ def test_now_playing_and_queue(gui):
 def test_controls_and_volume_cap(gui):
     client, runtime, house, _ = gui
     runtime.app.player.play(CATALOGUE[:2])
-    assert client.post("/api/playback/pause").json() == {"done": "pause"}
+    paused = client.post("/api/playback/pause").json()
+    assert paused["done"] == "pause" and "day plan" in paused["note"]
     assert house.by_name("Dining Room").state == "PAUSED_PLAYBACK"
     assert client.post("/api/playback/dance").status_code == 422
     assert client.post("/api/volume", json={"level": 30}).json()["volume"] == 30
@@ -370,3 +371,42 @@ def test_findings_api(gui):
     assert edited.json()["finding"]["status"] == "dropped"
     assert client.delete(f"/api/findings/{fid}").json() == {"ok": True}
     assert client.delete(f"/api/findings/{fid}").status_code == 404
+
+
+def test_choose_each_agents_model(gui):
+    client, runtime, _, memory = gui
+    models = client.get("/api/status").json()["agent"]["models"]
+    assert models["dj"] == {"model": "sonnet", "default": "sonnet", "chosen": False}
+    assert models["curator"]["model"] == "opus"
+    after = client.put("/api/agents/curator/model", json={"model": "haiku"}).json()
+    assert after["curator"] == {"model": "haiku", "default": "opus", "chosen": True}
+    assert memory.agent_model("curator") == "haiku"
+    assert client.put("/api/agents/curator/model", json={"model": None}).json()["curator"]["chosen"] is False
+    assert client.put("/api/agents/dj/model", json={"model": "gpt-4"}).status_code == 400
+
+
+def test_day_plan_page_edits_the_file_and_runs_the_orchestrator(gui, tmp_path):
+    from datetime import datetime
+
+    from tests.fakes import Clock
+    client, runtime, _, memory = gui
+    runtime.app.day_plan_path = tmp_path / "day_plan.toml"
+    runtime.orchestrator._now = Clock(datetime(2026, 10, 14, 9, 0))
+    page = client.get("/api/dayplan").json()
+    assert page["plan"]["enabled"] is False and page["orchestrator"]["running"] is False
+    plan = {**page["plan"], "enabled": True, "slots": [{"start": "wake", "mood": "gentle folk"}]}
+    assert client.put("/api/dayplan", json=plan).json()["plan"]["enabled"] is True
+    assert "gentle folk" in runtime.app.day_plan_path.read_text(encoding="utf-8")
+    bad = client.put("/api/dayplan", json={**plan, "sleep": "06:00"})
+    assert bad.status_code == 400 and "Bedtime" in bad.json()["detail"]
+    # Nothing is playing, so a check wakes the orchestrator agent (scripted here).
+    checked = client.post("/api/dayplan/check").json()
+    assert checked["check"]["action"] == "start" and checked["check"]["reply"] == "Queued some jazz."
+    orchestrator = runtime.conversation("orchestrator").agent
+    assert orchestrator.role == "orchestrator" and "nothing is playing" in orchestrator.prompts[0]
+    assert runtime.conversation("auto-dj").agent.tools.source == "auto"
+    assert client.get("/api/dayplan").json()["orchestrator"]["history"][0]["action"] == "start"
+    memory.start_quiet("gui")
+    assert client.get("/api/dayplan").json()["quiet_until"]
+    assert client.post("/api/dayplan/resume").json()["quiet_until"] is None
+

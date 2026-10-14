@@ -1,4 +1,4 @@
-"""Health of the moving parts: Discord bot, agent settings, safety limits, logs."""
+"""Health of the moving parts: Discord bot, agent settings (each agent's model), safety limits, logs."""
 
 from __future__ import annotations
 
@@ -8,10 +8,20 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
-from music_agent.gui.routes.deps import RuntimeDep
+from music_agent.agent.server import ROLE_TOOLS
+from music_agent.agent.session import model_for
+from music_agent.gui.routes.deps import MemoryDep, RuntimeDep
+from music_agent.learning.memory import AGENT_MODELS
 
 router = APIRouter(tags=["system"])
+
+
+class ModelChoice(BaseModel):
+    """An agent's model: one of ``AGENT_MODELS``, or None to use the one in config.toml."""
+
+    model: str | None = None
 
 
 @router.get("/status")
@@ -21,7 +31,7 @@ async def status(rt: RuntimeDep) -> dict[str, Any]:
     now = datetime.now().time()
     return {
         "bot": rt.bot.status(),
-        "agent": {"model": cfg.agent.model, "service": cfg.music.service},
+        "agent": {"models": _models(rt), "choices": list(AGENT_MODELS), "service": cfg.music.service},
         "safety": {
             "max_volume": cfg.safety.max_volume,
             "volume_cap_now": cfg.safety.volume_cap(now),
@@ -34,6 +44,20 @@ async def status(rt: RuntimeDep) -> dict[str, Any]:
         "started_at": rt.started_at.isoformat(timespec="seconds"),
         "log_file": str(rt.log_file) if rt.log_file else None,
     }
+
+
+@router.put("/agents/{role}/model")
+async def set_model(rt: RuntimeDep, memory: MemoryDep, role: str, body: ModelChoice) -> dict[str, Any]:
+    """Choose an agent's model; its conversations use it from their next request."""
+    await asyncio.to_thread(memory.set_agent_model, role, body.model or None)
+    return _models(rt)
+
+
+def _models(rt: RuntimeDep) -> dict[str, dict[str, Any]]:
+    """Per agent role: the model in use, the config.toml default, and whether it was chosen here."""
+    return {role: {"model": model_for(rt.app, role), "default": rt.app.config.agent.model_for(role),
+                   "chosen": bool(rt.app.memory and rt.app.memory.agent_model(role))}
+            for role in ROLE_TOOLS}
 
 
 @router.post("/bot/start")

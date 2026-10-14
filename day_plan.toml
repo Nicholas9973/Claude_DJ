@@ -1,0 +1,47 @@
+# The day plan: a rough outline of the music you want through the day.
+# The orchestrator reads it every few minutes and asks the DJ for fitting music.
+# Edit it here, on the GUI's Day page, or ask the curator. Changes apply at the next check.
+#
+# Times are "HH:MM", or relative to waking up / going to bed: "wake", "wake+90m", "sleep-1h".
+# A slot lasts until the next one starts. days = "all", "weekdays" or "weekend".
+# quiet = true means: don't start music then (music already playing is left alone).
+# rooms = ["Night"] plays only there (leave it out for the default rooms).
+
+enabled = true
+wake = "08:00"
+sleep = "23:00"
+weekend_wake = "09:30"
+weekend_sleep = "23:30"
+check_every_minutes = 5
+quiet_after_stop_hours = 3
+respect_requests_minutes = 120
+
+[[slots]]
+start = "wake"
+mood = "Gentle wake-up: soft, warm and unhurried, building slowly"
+
+[[slots]]
+start = "wake+1h"
+mood = "Bright and easy-going for getting ready and breakfast"
+
+[[slots]]
+start = "10:00"
+mood = "Focus: mostly instrumental, steady and unobtrusive"
+days = "weekdays"
+
+[[slots]]
+start = "11:00"
+mood = "Lazy weekend late morning: relaxed, sunny, a bit of groove"
+days = "weekend"
+
+[[slots]]
+start = "14:00"
+mood = "Afternoon: more energy and groove"
+
+[[slots]]
+start = "18:30"
+mood = "Evening and dinner: warm, soulful, sociable"
+
+[[slots]]
+start = "sleep-90m"
+mood = "Wind-down: calm, quiet, low energy"
