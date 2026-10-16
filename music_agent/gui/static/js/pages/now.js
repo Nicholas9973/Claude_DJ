@@ -40,7 +40,7 @@ export default {
     const total = h("span", {}, "-:--");
     const fill = h("div", { class: "bar-fill" });
     const playBtn = h("button", { class: "icon-btn big", title: "Play / pause", onclick: togglePlay }, icon("play"));
-    const likeBtn = h("button", { class: "icon-btn", title: "I like this (saved to your taste)", onclick: () => rate("like") }, icon("up"));
+    const likeBtn = h("button", { class: "icon-btn", title: "I like this (saved to your taste)", onclick: () => toggleLike() }, icon("up"));
     const dislikeBtn = h("button", { class: "icon-btn", title: "Not for me (saved, and skips)", onclick: () => rate("dislike") }, icon("down"));
     const volume = h("input", { type: "range", min: 0, max: 100, value: 0, oninput: onVolume, "aria-label": "Volume" });
     const volumeValue = h("span", { class: "value" });
@@ -134,10 +134,10 @@ export default {
       const key = `${np.title}|${np.artist}|${np.queue_position}|${np.queue_length}`;
       if (key !== trackKey) {
         trackKey = key;
-        likeBtn.classList.remove("liked");
         dislikeBtn.classList.remove("disliked");
         loadQueue();
       }
+      showLiked(Boolean(np.liked));   // saved likes, so a liked song shows liked whenever it plays
       tickProgress();
     }
 
@@ -177,11 +177,24 @@ export default {
       control(np && np.state === "PLAYING" ? "pause" : "resume");
     }
 
+    function showLiked(liked) {
+      likeBtn.classList.toggle("liked", liked);
+      likeBtn.title = liked ? "You like this. Click to take the like back" : "I like this (saved to your taste)";
+    }
+
+    async function toggleLike() {
+      if (!likeBtn.classList.contains("liked")) return rate("like");
+      const out = await attempt(() => api("/rate", { method: "DELETE" }));
+      if (!out) return;
+      showLiked(false);
+      toast(out.removed ? `Like removed: ${out.target}` : "That track had no saved like.");
+    }
+
     async function rate(sentiment) {
       const saved = await attempt(() => api("/rate", { method: "POST", body: { sentiment, skip: sentiment === "dislike" } }));
       if (!saved) return;
       if (sentiment === "like") {
-        likeBtn.classList.add("liked");
+        showLiked(true);
         toast(`Noted: you like ${saved.target}`);
       } else {
         toast(`Noted, and skipped: ${saved.target}`);

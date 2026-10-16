@@ -45,7 +45,17 @@ async def now_playing(rt: RuntimeDep) -> dict[str, Any]:
     data["position_s"] = parse_hms(np.position)
     data["duration_s"] = parse_hms(np.duration)
     data["volume_cap"] = rt.app.config.safety.volume_cap(datetime.now().time())
+    data["liked"] = bool(await _likes_of_current(rt, np))
     return data
+
+
+async def _likes_of_current(rt: RuntimeDep, np: Any) -> list[int]:
+    """Ids of the likes given to the track now playing (none without memory or a track)."""
+    memory = rt.app.memory
+    if memory is None or not np.title:
+        return []
+    artist = np.artist or await asyncio.to_thread(memory.artist_for_title, np.title)
+    return await asyncio.to_thread(memory.track_likes, np.title, artist)
 
 
 @router.get("/rooms")
@@ -91,6 +101,18 @@ async def rate(rt: RuntimeDep, body: RateBody) -> dict[str, Any]:
     if body.skip:
         await rt.tools.playback_control("skip")
     return saved
+
+
+@router.delete("/rate")
+async def unlike(rt: RuntimeDep, memory: MemoryDep) -> dict[str, Any]:
+    """Take back the like(s) of the current track (all of them, wherever they were given)."""
+    np = await asyncio.to_thread(rt.app.player.now_playing)
+    if not np.title:
+        raise ValueError("Nothing is playing, so there is no current track to unlike.")
+    ids = await _likes_of_current(rt, np)
+    for fid in ids:
+        await asyncio.to_thread(memory.forget_feedback, fid)
+    return {"removed": len(ids), "target": " - ".join(p for p in (np.title, np.artist) if p)}
 
 
 

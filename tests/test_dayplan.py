@@ -53,6 +53,8 @@ def test_save_and_load_round_trip(tmp_path):
     p = plan()
     p.slots[0].mood = 'soft "warm" music'
     p.slots[1].rooms = ["Morn’", "Night"]
+    p.slots[1].volume_change = -2
+    p.morning_volume = 9
     dayplan.save(p, path)
     assert dayplan.load(path) == p
     assert path.read_text(encoding="utf-8").startswith("# The day plan")
@@ -74,7 +76,10 @@ def test_missing_file_is_an_empty_plan_that_is_off(tmp_path):
     ({"slots": [{"start": "wake"}]}, "needs a mood"),
     ({"slots": [{"start": "wake", "mood": "x", "days": "mondays"}]}, "days must be"),
     ({"slots": [{"start": "sleep+3h", "mood": "x"}]}, "outside the day"),
-    ({"slots": [{"start": "wake", "mood": "x", "volume": 9}]}, "unknown setting"),
+    ({"slots": [{"start": "wake", "mood": "x", "colour": 9}]}, "unknown setting"),
+    ({"morning_volume": 120}, "morning_volume must be 0-100"),
+    ({"slots": [{"start": "wake", "mood": "x", "volume_change": 40}]}, "between -30 and \\+30"),
+    ({"slots": [{"start": "wake", "mood": "x", "volume_change": "loud"}]}, "whole number"),
 ])
 def test_bad_plans_are_refused_with_a_reason(change, message):
     with pytest.raises(ValueError, match=message):
@@ -84,3 +89,12 @@ def test_bad_plans_are_refused_with_a_reason(change, message):
 def test_rooms_may_be_typed_as_text():
     p = from_dict({"slots": [{"start": "wake", "mood": "x", "rooms": "Night, Morn"}]})
     assert p.slots[0].rooms == ["Night", "Morn"]
+
+
+def test_volume_changes_add_up_through_the_day():
+    p = from_dict({"morning_volume": "8", "slots": [
+        {"start": "wake", "mood": "a"}, {"start": "wake+1h", "mood": "b", "volume_change": "+4"},
+        {"start": "14:00", "mood": "c", "volume_change": -3}]})
+    assert p.morning_volume == 8 and p.slots[1].volume_change == 4
+    assert [p.volume_changes_until(WEDNESDAY.replace(hour=h)) for h in (8, 9, 13, 15, 23)] == [0, 4, 4, 1, 0]
+

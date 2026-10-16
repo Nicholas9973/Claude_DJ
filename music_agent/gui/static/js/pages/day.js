@@ -6,7 +6,7 @@ import { ago, attempt, every, h, icon, toast } from "../ui.js";
 
 const ACTIONS = {
   start: ["Started music", "good"], top_up: ["Topped up", "good"], new_slot: ["New part of the day", "good"],
-  quiet: ["Stopped: staying quiet", "bad"], unquiet: ["Music back on", ""], adopt: ["Took over", ""], idle: ["Nothing to do", ""],
+  quiet: ["Stopped: staying quiet", "bad"], bedtime: ["Bedtime: faded out", ""], unquiet: ["Music back on", ""], adopt: ["Took over", ""], idle: ["Nothing to do", ""],
 };
 const DAYS = [["all", "Every day"], ["weekdays", "Weekdays"], ["weekend", "Weekend"]];
 const REVIEW = "Review my day plan: compare it with what I actually listened to, skipped and stopped lately, and suggest changes.";
@@ -92,7 +92,9 @@ export default {
           ? h("ol", { class: "day-today" }, t.slots.map((s) => h("li", { class: s.now ? "now" : "" },
             h("span", { class: "day-time" }, s.time),
             h("span", {}, s.quiet ? h("em", { class: "faint" }, "quiet") : s.mood,
-              s.rooms ? h("span", { class: "chip tiny" }, s.rooms.join(", ")) : null))))
+              s.rooms ? h("span", { class: "chip tiny" }, s.rooms.join(", ")) : null,
+              s.volume_change ? h("span", { class: "chip tiny", title: "Volume change when this part begins" },
+                `vol ${s.volume_change > 0 ? "+" : ""}${s.volume_change}`) : null))))
           : h("p", { class: "empty" }, "No parts of the day apply today."));
     }
 
@@ -119,7 +121,10 @@ export default {
     function renderEditor(plan) {
       const field = (label, key, attrs) => h("label", { class: "day-field" }, h("span", { class: "faint" }, label),
         h("input", { class: "input", value: plan[key], ...attrs,
-          oninput: (e) => { plan[key] = attrs.type === "number" ? Number(e.target.value) : e.target.value; } }));
+          oninput: (e) => {
+            const v = e.target.value;
+            plan[key] = attrs.type !== "number" ? v : v === "" && attrs.optional ? null : Number(v);
+          } }));
       const slots = h("div", { class: "day-slots" });
       const drawSlots = () => slots.replaceChildren(...plan.slots.map((s, i) => slotRow(s, i)));
 
@@ -135,6 +140,9 @@ export default {
             oninput: (e) => { s.mood = e.target.value; } }),
           h("input", { class: "input day-rooms", value: (s.rooms || []).join(", "), placeholder: "All rooms",
             oninput: (e) => { s.rooms = e.target.value.split(",").map((r) => r.trim()).filter(Boolean); } }),
+          h("input", { class: "input day-volume", type: "number", min: -30, max: 30, value: s.volume_change || "",
+            placeholder: "±0", title: "Added to the volume when this part begins, e.g. 3 or -2 (on top of your own changes)",
+            oninput: (e) => { s.volume_change = e.target.value === "" ? 0 : Number(e.target.value); } }),
           h("label", { class: "day-quiet", title: "Don't start music in this part of the day" },
             h("input", { type: "checkbox", checked: s.quiet, onchange: (e) => { s.quiet = e.target.checked; drawSlots(); } }), "quiet"),
           h("button", { class: "btn small", title: "Remove", onclick: () => { plan.slots.splice(i, 1); drawSlots(); } }, icon("trash")));
@@ -154,7 +162,7 @@ export default {
       drawSlots();
       editor.replaceChildren(
         h("h2", {}, "Plan"),
-        h("p", { class: "hint muted" }, "Times are HH:MM or relative to waking up / bedtime (wake, wake+90m, sleep-1h). A part lasts until the next one starts. Saved to ", h("code", {}, "day_plan.toml"), "."),
+        h("p", { class: "hint muted" }, "Times are HH:MM or relative to waking up / bedtime (wake, wake+90m, sleep-1h). A part lasts until the next one starts. The volume is reset to the morning volume when you wake up; after that each part's change is added to whatever it is then, so your own adjustments are kept. Saved to ", h("code", {}, "day_plan.toml"), "."),
         h("div", { class: "day-settings" },
           field("Wake (weekdays)", "wake", { type: "time" }),
           field("Bedtime (weekdays)", "sleep", { type: "time" }),
@@ -162,12 +170,14 @@ export default {
           field("Bedtime (weekend)", "weekend_sleep", { type: "time" }),
           field("Quiet after a stop (hours)", "quiet_after_stop_hours", { type: "number", min: 0, max: 24, step: 0.5 }),
           field("Keep music you chose (min)", "respect_requests_minutes", { type: "number", min: 0, max: 1440, step: 15 }),
-          field("Check every (min)", "check_every_minutes", { type: "number", min: 1, max: 60 })),
+          field("Check every (min)", "check_every_minutes", { type: "number", min: 1, max: 60 }),
+          field("Morning volume (blank: no reset)", "morning_volume",
+            { type: "number", min: 0, max: 100, optional: true, value: plan.morning_volume ?? "" })),
         h("div", { class: "day-slot day-head faint" }, h("span", {}, "Starts"), h("span", {}, "Days"), h("span", {}, "Mood"),
-          h("span", {}, "Rooms"), h("span", {}, ""), h("span", {}, "")),
+          h("span", {}, "Rooms"), h("span", {}, "Vol. ±"), h("span", {}, ""), h("span", {}, "")),
         slots,
         h("div", { class: "day-actions" },
-          h("button", { class: "btn", onclick: () => { plan.slots.push({ start: "", mood: "", days: "all", rooms: [], quiet: false }); drawSlots(); } },
+          h("button", { class: "btn", onclick: () => { plan.slots.push({ start: "", mood: "", days: "all", rooms: [], quiet: false, volume_change: 0 }); drawSlots(); } },
             icon("plus"), "Add a part of the day"),
           h("span", { style: { flex: 1 } }),
           h("button", { class: "btn", onclick: () => renderEditor(structuredClone(data.plan)) }, icon("undo"), "Discard changes"),

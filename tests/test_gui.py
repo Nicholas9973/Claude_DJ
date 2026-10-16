@@ -92,6 +92,23 @@ def test_rate_current_track(gui):
     assert client.get("/api/now").json()["queue_position"] == 2   # skipped
 
 
+def test_a_liked_track_shows_liked_and_a_second_click_takes_it_back(gui):
+    client, runtime, _, memory = gui
+    assert client.delete("/api/rate").status_code == 400            # nothing playing
+    runtime.app.player.play(CATALOGUE[:2])
+    now = client.get("/api/now").json()
+    assert now["liked"] is False
+    client.post("/api/rate", json={"sentiment": "like"})
+    assert client.get("/api/now").json()["liked"] is True
+    # A like given elsewhere (e.g. Discord), spelled a little differently, counts too.
+    memory.record_feedback(1, "track", now["title"].upper(), now["artist"], source="dj")
+    memory.record_feedback(1, "track", "Something Else", now["artist"], source="dj")
+    out = client.delete("/api/rate").json()
+    assert out["removed"] == 2 and client.get("/api/now").json()["liked"] is False
+    assert [f["title"] for f in memory.recent_feedback()] == ["Something Else"]
+    assert client.delete("/api/rate").json()["removed"] == 0
+
+
 def test_speakers_offline_is_503(gui, monkeypatch):
     client, runtime, *_ = gui
 

@@ -187,6 +187,13 @@ tests/                  one file per module; shared fakes/builders in tests/fake
   `"auto"`: its plays don't count as the person's choice and its stops don't start a quiet
   period. Anyone else's pause/stop calls `memory.start_quiet` (table `quiet_requests`); any
   non-auto play or resume ends it; a playing→paused change seen on the speakers counts too.
+  Volume is handled in code (`Orchestrator._follow_volume`), never by an agent: reset to
+  `morning_volume` at the first check of the day (only within `MORNING_RESET_HOURS` of waking),
+  then each slot's `volume_change` is added relative to the current level, so the person's own
+  changes are kept (the owner explicitly didn't want absolute per-slot volumes).
+  At bedtime `decide` returns "bedtime" when the playing music is the orchestrator's
+  (`memory.last_play()` source "auto"): `_fade_out` steps the volume down, stops, restores the
+  volume; at most once per `FADE_ONCE_HOURS`. The person's own music is never faded.
   Only one process may orchestrate: `Runtime.start(orchestrate=...)`, off with `--no-bot`.
   CHECK constraints that gain values use `db.widen_check` (rebuilds the table, keeps rows).
 - **Genres in the taste model:** listens copy the set's genre from their play's request

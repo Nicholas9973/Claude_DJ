@@ -20,8 +20,9 @@ There are three agents with different jobs:
   rough outline of the music you want when (wake-up, focus, dinner,
   wind-down...), reads your taste, and asks the DJ for a fitting style. Code
   checks the speakers every few minutes and only wakes it when something needs
-  doing (nothing playing, the queue running out, a new part of the day). It
-  never stops music or changes the volume, and after you stop or pause the
+  doing (nothing playing, the queue running out, a new part of the day). At
+  bedtime it fades out and stops its own music (music you chose is left
+  alone). It never stops your music, and after you stop or pause the
   music (from Discord, the GUI or the Sonos app) it stays quiet for a few
   hours; asking for music again ends that early.
 
@@ -95,7 +96,11 @@ two orchestrators will run the day. `--no-bot` starts neither.) Pages:
   parts of the day (the current one highlighted), edit wake-up and bedtime
   (weekdays and weekend), how long to stay quiet after a stop, and each part of
   the day: when it starts (`14:00`, or relative like `wake+1h`, `sleep-90m`),
-  which days, the mood in your words, rooms, or "quiet" for no music. "Check
+  which days, the mood in your words, rooms, a volume change, or "quiet" for
+  no music. The volume is reset to the **morning volume** at the first check
+  after you wake up, so last night's level never carries over; after that each
+  part's change (e.g. +3) is added to whatever the volume is when it begins, so
+  your own adjustments are kept. "Check
   now" runs a check immediately; "Recent activity" shows what it did and why.
   It ships turned **off**: check the times, then switch it on.
 - **Playlists**: saved playlists. Play, shuffle or queue them; rename them and

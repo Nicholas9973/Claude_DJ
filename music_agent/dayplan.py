@@ -30,8 +30,13 @@ HEADER = """\
 #
 # Times are "HH:MM", or relative to waking up / going to bed: "wake", "wake+90m", "sleep-1h".
 # A slot lasts until the next one starts. days = "all", "weekdays" or "weekend".
+# At bedtime (sleep), the day plan's own music fades out and stops; music you chose is left alone.
 # quiet = true means: don't start music then (music already playing is left alone).
 # rooms = ["Night"] plays only there (leave it out for the default rooms).
+#
+# Volume: morning_volume is where the volume is reset each morning (at the first check after
+# waking up). After that, a part's volume_change (e.g. +3 or -2) is added to whatever the volume
+# is when that part begins, so your own adjustments are kept. Capped by [safety] in config.toml.
 """
 
 
@@ -46,6 +51,8 @@ class Slot:
         days: ``"all"``, ``"weekdays"`` or ``"weekend"``.
         rooms: Only these rooms; empty for the default.
         quiet: Don't start music during this slot.
+        volume_change: Added to the volume when this part begins (e.g. +3,
+            -2), on top of any change you made yourself; 0 leaves it.
     """
 
     start: str
@@ -53,6 +60,7 @@ class Slot:
     days: str = "all"
     rooms: list[str] = field(default_factory=list)
     quiet: bool = False
+    volume_change: int = 0
 
 
 @dataclass
@@ -62,7 +70,8 @@ class DayPlan:
     Attributes:
         enabled: The orchestrator runs only when this is true.
         wake: When you get up on weekdays, ``"HH:MM"``.
-        sleep: When music should end on weekdays.
+        sleep: Weekday bedtime: no music is started after it, and the
+            orchestrator's own music fades out.
         weekend_wake: Wake-up on Saturday and Sunday.
         weekend_sleep: Bedtime on Saturday and Sunday.
         check_every_minutes: How often the speakers are checked (cheap; Claude
@@ -70,6 +79,8 @@ class DayPlan:
         quiet_after_stop_hours: After you stop or pause the music, stay quiet this long.
         respect_requests_minutes: Music you asked for yourself isn't replaced
             when a new slot starts until it is this old.
+        morning_volume: The volume is reset to this each morning (plus the
+            changes of any parts already begun); None never resets it.
         slots: The parts of the day.
     """
 
@@ -81,6 +92,7 @@ class DayPlan:
     check_every_minutes: int = 5
     quiet_after_stop_hours: float = 3
     respect_requests_minutes: int = 120
+    morning_volume: int | None = None
     slots: list[Slot] = field(default_factory=list)
 
     # ------------------------------------------------------------ reading the plan
@@ -114,6 +126,12 @@ class DayPlan:
         slots = self.slots_for(now.date())
         started = [pair for pair in slots if pair[0] <= now.time()]
         return started[-1] if started else (slots[0] if slots else None)
+
+    def volume_changes_until(self, now: datetime) -> int:
+        """The sum of today's ``volume_change`` of every part that has begun by ``now``."""
+        if not self.awake(now):
+            return 0
+        return sum(s.volume_change for t, s in self.slots_for(now.date()) if t <= now.time())
 
     def upcoming(self, now: datetime) -> tuple[time, Slot] | None:
         """The next slot to start today, if any."""
@@ -193,13 +211,29 @@ def from_dict(data: dict[str, Any]) -> DayPlan:
         rooms = raw.get("rooms") or []
         if isinstance(rooms, str):
             rooms = [r.strip() for r in rooms.split(",") if r.strip()]
+        change = _number(raw.get("volume_change"), f"Slot {i}: volume_change") or 0
         slots.append(Slot(start=str(raw.get("start", "")).strip(), mood=str(raw.get("mood") or "").strip(),
                           days=str(raw.get("days") or "all"), rooms=[str(r) for r in rooms],
-                          quiet=bool(raw.get("quiet", False))))
-    plan = DayPlan(**{**{k: v for k, v in data.items() if k != "slots"}, "slots": slots})
+                          quiet=bool(raw.get("quiet", False)), volume_change=change))
+    settings = {k: v for k, v in data.items() if k != "slots"}
+    if "morning_volume" in settings:
+        settings["morning_volume"] = _number(settings["morning_volume"], "morning_volume")
+    plan = DayPlan(**{**settings, "slots": slots})
     plan.enabled = bool(plan.enabled)
     check(plan)
     return plan
+
+
+def _number(value: Any, name: str) -> int | None:
+    """A whole number from the file, the GUI or the curator; None when empty."""
+    if value in ("", None):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise ValueError(f"{name} must be a whole number")
+    try:
+        return int(float(str(value).replace("+", "")))
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number") from None
 
 
 def check(plan: DayPlan) -> None:
@@ -214,11 +248,15 @@ def check(plan: DayPlan) -> None:
         raise ValueError("quiet_after_stop_hours must be 0-24")
     if not 0 <= int(plan.respect_requests_minutes) <= 24 * 60:
         raise ValueError("respect_requests_minutes must be 0-1440")
+    if plan.morning_volume is not None and not 0 <= plan.morning_volume <= 100:
+        raise ValueError("morning_volume must be 0-100")
     for i, s in enumerate(plan.slots, 1):
         if s.days not in DAYS:
             raise ValueError(f"Slot {i}: days must be one of {', '.join(DAYS)}")
         if not s.quiet and not s.mood:
             raise ValueError(f"Slot {i} ({s.start}) needs a mood, or quiet = true")
+        if not -30 <= s.volume_change <= 30:
+            raise ValueError(f"Slot {i}: volume_change must be between -30 and +30")
         for day in (date(2026, 1, 5), date(2026, 1, 10)):
             try:
                 resolve_time(s.start, *plan.wake_sleep(day))
@@ -235,6 +273,8 @@ def slot_dict(s: Slot) -> dict[str, Any]:
         d["rooms"] = s.rooms
     if s.quiet:
         d["quiet"] = True
+    if s.volume_change:
+        d["volume_change"] = s.volume_change
     return d
 
 
@@ -259,7 +299,7 @@ def save(plan: DayPlan, path: Path = DAY_PLAN_PATH) -> None:
     check(plan)
     lines = [HEADER]
     for key, value in plan.as_dict().items():
-        if key != "slots":
+        if key != "slots" and value is not None:
             lines.append(f"{key} = {_toml(value)}")
     for s in plan.slots:
         lines += ["", "[[slots]]", f"start = {_toml(s.start)}", f"mood = {_toml(s.mood)}"]
@@ -269,6 +309,8 @@ def save(plan: DayPlan, path: Path = DAY_PLAN_PATH) -> None:
             lines.append(f"rooms = {_toml(s.rooms)}")
         if s.quiet:
             lines.append("quiet = true")
+        if s.volume_change:
+            lines.append(f"volume_change = {s.volume_change}")
     tmp = path.with_suffix(".tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmp.replace(path)           # never leave a half-written plan

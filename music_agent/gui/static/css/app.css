@@ -345,7 +345,7 @@ textarea.cell-input { min-width: 320px; resize: vertical; white-space: pre-wrap;
 .day-field { display: grid; gap: 4px; font-size: 13px; }
 .day-field .input { padding: 8px 12px; border-radius: 10px; }
 .day-slots { display: grid; gap: 8px; }
-.day-slot { display: grid; gap: 8px; align-items: center; grid-template-columns: 130px 120px minmax(0, 1fr) 150px auto auto; }
+.day-slot { display: grid; gap: 8px; align-items: center; grid-template-columns: 130px 120px minmax(0, 1fr) 150px 84px 72px 46px; }
 .day-slot .input { padding: 8px 12px; border-radius: 10px; width: 100%; min-width: 0; }
 .day-head { font-size: 12px; margin-bottom: 4px; }
 .day-quiet { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }

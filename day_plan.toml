@@ -6,15 +6,20 @@
 # A slot lasts until the next one starts. days = "all", "weekdays" or "weekend".
 # quiet = true means: don't start music then (music already playing is left alone).
 # rooms = ["Night"] plays only there (leave it out for the default rooms).
+#
+# Volume: morning_volume is where the volume is reset each morning (at the first check after
+# waking up). After that, a part's volume_change (e.g. +3 or -2) is added to whatever the volume
+# is when that part begins, so your own adjustments are kept. Capped by [safety] in config.toml.
 
 enabled = true
-wake = "08:00"
+wake = "09:00"
 sleep = "23:00"
 weekend_wake = "09:30"
 weekend_sleep = "23:30"
 check_every_minutes = 5
 quiet_after_stop_hours = 3
 respect_requests_minutes = 120
+morning_volume = 8
 
 [[slots]]
 start = "wake"
@@ -23,25 +28,36 @@ mood = "Gentle wake-up: soft, warm and unhurried, building slowly"
 [[slots]]
 start = "wake+1h"
 mood = "Bright and easy-going for getting ready and breakfast"
-
-[[slots]]
-start = "10:00"
-mood = "Focus: mostly instrumental, steady and unobtrusive"
-days = "weekdays"
+volume_change = 4
 
 [[slots]]
 start = "11:00"
+mood = "Focus: mostly instrumental, steady and unobtrusive"
+days = "weekdays"
+volume_change = -2
+
+[[slots]]
+start = "12:00"
 mood = "Lazy weekend late morning: relaxed, sunny, a bit of groove"
 days = "weekend"
+volume_change = 1
 
 [[slots]]
 start = "14:00"
 mood = "Afternoon: more energy and groove"
+volume_change = 3
 
 [[slots]]
 start = "18:30"
 mood = "Evening and dinner: warm, soulful, sociable"
+volume_change = -2
 
 [[slots]]
 start = "sleep-90m"
 mood = "Wind-down: calm, quiet, low energy"
+volume_change = -4
+
+[[slots]]
+start = "sleep"
+mood = ""
+quiet = true

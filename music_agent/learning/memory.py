@@ -435,6 +435,23 @@ class Memory:
         """
         return self.db.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,)) > 0
 
+    def track_likes(self, title: str | None, artist: str | None) -> list[int]:
+        """Ids of the likes given to one track (from anywhere: GUI, Discord, quizzes), compared loosely.
+
+        Args:
+            title: Track title.
+            artist: Track artist; without one, any artist matches.
+
+        Returns:
+            Feedback ids, oldest first (empty if it was never liked).
+        """
+        if not title:
+            return []
+        want = norm(title)
+        return [r["id"] for r in self._query("SELECT id, title, artist FROM feedback "
+                                             "WHERE scope = 'track' AND sentiment = 1 ORDER BY id")
+                if norm(r["title"]) == want and (not artist or norm(r["artist"]) == norm(artist))]
+
     # ------------------------------------------------------------ preferences
     def add_preference(self, kind: str, sentiment: int, subject: str, artist: str | None = None,
                        part: str | None = None, note: str | None = None, frequency: str | None = None,

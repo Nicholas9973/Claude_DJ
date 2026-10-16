@@ -73,15 +73,21 @@ SLOT = {"type": "object", "required": ["start"], "properties": {
     "days": {"type": "string", "enum": ["all", "weekdays", "weekend"]},
     "rooms": {"type": "array", "items": {"type": "string"}, "description": "only these rooms; omit for the default"},
     "quiet": {"type": "boolean", "description": "true: don't start music in this part of the day"},
+    "volume_change": {"type": "integer", "minimum": -30, "maximum": 30,
+                      "description": "added to the volume when this part begins, e.g. 3 or -2 (on top of "
+                                     "the person's own changes); omit for none"},
 }}
 DAY_PLAN = {"type": "object", "properties": {
     "enabled": {"type": "boolean", "description": "the orchestrator runs only when true"},
     "wake": {"type": "string", "description": "weekday wake-up, HH:MM"},
-    "sleep": {"type": "string", "description": "weekday bedtime (music isn't started after it), HH:MM"},
+    "sleep": {"type": "string", "description": "weekday bedtime, HH:MM: no music is started after it, and the "
+                                              "orchestrator's own music fades out"},
     "weekend_wake": {"type": "string"},
     "weekend_sleep": {"type": "string"},
     "check_every_minutes": {"type": "integer", "minimum": 1, "maximum": 60},
     "quiet_after_stop_hours": {"type": "number", "minimum": 0, "maximum": 24},
+    "morning_volume": {"type": ["integer", "null"], "minimum": 0, "maximum": 100,
+                       "description": "the volume is reset to this each morning; null never resets it"},
     "respect_requests_minutes": {"type": "integer", "minimum": 0, "maximum": 1440,
                                  "description": "music the person chose isn't replaced at a new slot until "
                                                 "it is this old"},

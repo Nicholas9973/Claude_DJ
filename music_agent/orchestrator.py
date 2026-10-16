@@ -9,9 +9,23 @@ something needs doing (``decide``), and only then the orchestrator agent decides
 - a new part of the day plan started, unless you chose the current music
   yourself recently (``respect_requests_minutes`` in the plan).
 
+At bedtime, if the music still playing is the orchestrator's own (the latest
+queued tracks came from it), the volume is faded out over ``FADE_SECONDS`` and
+the music stopped; the volume is then put back, silently, so the next music
+doesn't start at zero. Music you chose yourself is left alone, and it fades at
+most once a night, so pressing play again isn't fought.
+
 It stays out of your way: after you stop or pause the music (from the DJ, the
 GUI, or the Sonos app) it starts nothing for ``quiet_after_stop_hours``, and it
-never stops music or changes the volume. Asking for music ends the quiet early.
+never stops music. Asking for music ends the quiet early.
+
+Volume is handled here in code (the agent can't touch it), gently, so it never
+overrides you: at the first check each morning (up to ``MORNING_RESET_HOURS``
+after waking) it is reset to the plan's ``morning_volume``, so last night's level
+doesn't carry over. After that, when a part of the day begins, its
+``volume_change`` is *added* to whatever the volume is then, so a change you
+made yourself is kept. A running total (``_volume_mark``) catches up on parts
+that began between checks.
 """
 
 from __future__ import annotations
@@ -22,7 +36,7 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from music_agent import dayplan
@@ -34,6 +48,10 @@ log = logging.getLogger(__name__)
 TOP_UP_TRACKS = 2          # ask for more when this many tracks or fewer are left
 MIN_GAP_MINUTES = 10       # don't wake the agent again sooner than this after it acted
 MAX_RUNS_PER_DAY = 40      # a safety net against a loop that keeps asking Claude
+FADE_SECONDS = 60          # how long the bedtime fade-out takes
+FADE_STEPS = 12
+FADE_ONCE_HOURS = 12       # after a bedtime fade, don't fade again for this long (you pressed play again)
+MORNING_RESET_HOURS = 2    # the morning volume reset happens only this long after waking (not after a mid-day restart)
 PLAYING_STATES = ("PLAYING", "TRANSITIONING")
 
 RunAgent = Callable[[str], Awaitable[dict[str, Any]]]   # message -> {"reply", "steps", "error"}
@@ -52,6 +70,8 @@ class Situation:
         was_remaining: Tracks left at the previous check.
         quiet_until: The person stopped the music; stay quiet until then.
         user_music_at: When the person last started music themselves (not the orchestrator).
+        music_is_ours: The latest queued tracks came from the orchestrator (its DJ).
+        faded_at: When the orchestrator last faded the music out at bedtime.
         last_action: When the orchestrator last asked the DJ for music.
         acted_slot: The slot (``slot_key``) the orchestrator last played for.
         in_safety_quiet: Inside the quiet hours from config.toml.
@@ -65,6 +85,8 @@ class Situation:
     was_remaining: int | None = None
     quiet_until: datetime | None = None
     user_music_at: datetime | None = None
+    music_is_ours: bool = False
+    faded_at: datetime | None = None
     last_action: datetime | None = None
     acted_slot: str | None = None
     in_safety_quiet: bool = False
@@ -77,8 +99,9 @@ class Decision:
     Attributes:
         action: ``"idle"`` (nothing to do), ``"quiet"`` (someone stopped the
             music: start a quiet period), ``"unquiet"`` (they started it again),
-            ``"adopt"`` (remember the current slot without acting), or a reason
-            to wake the agent: ``"start"``, ``"top_up"`` or ``"new_slot"``.
+            ``"adopt"`` (remember the current slot without acting), ``"bedtime"``
+            (fade out the orchestrator's music), or a reason to wake the agent:
+            ``"start"``, ``"top_up"`` or ``"new_slot"``.
         reason: In words, for the log, the GUI and the agent.
         slot: The slot in effect, if any.
         slot_time: When that slot started today.
@@ -114,6 +137,9 @@ def decide(s: Situation) -> Decision:
         return Decision("idle", "the day plan is turned off")
     wake, sleep = plan.wake_sleep(now.date())
     if not plan.awake(now):
+        faded_lately = s.faded_at is not None and now - s.faded_at < timedelta(hours=FADE_ONCE_HOURS)
+        if s.playing and s.music_is_ours and not faded_lately:
+            return Decision("bedtime", "bedtime: fading out the day plan's music")
         return Decision("idle", f"outside waking hours ({wake:%H:%M}-{sleep:%H:%M})")
     if s.in_safety_quiet:
         return Decision("idle", "inside the quiet hours from config.toml")
@@ -175,7 +201,11 @@ class Orchestrator:
         self.last_check: dict[str, Any] | None = None
         self._seen: tuple[bool, int | None] | None = None   # (playing, remaining) at the previous check
         self._acted_slot: str | None = None
+        self._reset_day: date | None = None    # the day the morning volume was handled
+        self._volume_mark = 0                   # today's volume changes already applied (see volume_changes_until)
         self._last_action: datetime | None = None
+        self._faded_at: datetime | None = None
+        self.fade_seconds: float = FADE_SECONDS     # shortened in tests
         self._runs: dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -233,7 +263,8 @@ class Orchestrator:
                 return self.last_check
             decision = decide(situation)
             entry: dict[str, Any] = {"time": situation.now.isoformat(timespec="seconds"),
-                                     "action": decision.action, "reason": decision.reason}
+                                     "action": decision.action, "reason": decision.reason,
+                                     **await self._follow_volume(situation)}
             if decision.slot:
                 entry["slot"] = {"time": decision.slot_time, **dayplan.slot_dict(decision.slot)}
             memory = self.app.memory
@@ -241,12 +272,14 @@ class Orchestrator:
                 await asyncio.to_thread(memory.start_quiet, "speakers")
             elif decision.action == "unquiet" and memory:
                 await asyncio.to_thread(memory.end_quiet)
+            elif decision.action == "bedtime":
+                entry.update(await self._fade_out(situation.now))
             elif decision.action == "adopt" and decision.slot:
                 self._acted_slot = slot_key(situation.now, decision.slot)
             elif decision.wakes_agent:
                 entry.update(await self._wake(situation, decision))
             self.last_check = entry
-            if decision.action != "idle":
+            if decision.action != "idle" or "volume" in entry:
                 self.history.append(entry)
                 log.info("Orchestrator: %s (%s)%s", decision.action, decision.reason,
                          f": {entry['reply']}" if entry.get("reply") else "")
@@ -272,18 +305,21 @@ class Orchestrator:
         was = self._seen
         self._seen = (playing, remaining)
         quiet_until = user_music_at = None
+        music_is_ours = False
         memory = self.app.memory
         if memory:
             since = await asyncio.to_thread(memory.quiet_since)
             if since:
                 quiet_until = since + timedelta(hours=float(plan.quiet_after_stop_hours))
             last = await asyncio.to_thread(memory.last_play)
+            music_is_ours = bool(last and last["source"] == "auto")
             if last and last["source"] != "auto":
                 with contextlib.suppress(ValueError, TypeError):
                     user_music_at = datetime.fromisoformat(last["ts"])
         return Situation(now, plan, playing, remaining,
                          was_playing=was[0] if was else None, was_remaining=was[1] if was else None,
                          quiet_until=quiet_until, user_music_at=user_music_at, last_action=self._last_action,
+                         music_is_ours=music_is_ours, faded_at=self._faded_at,
                          acted_slot=self._acted_slot,
                          in_safety_quiet=self.app.config.safety.in_quiet_hours(now.time()))
 
@@ -298,6 +334,63 @@ class Orchestrator:
         result = await self._run_agent(self.message(s, d))
         return {"reply": result.get("reply", ""), "steps": result.get("steps", []),
                 **({"error": result["error"]} if result.get("error") else {})}
+
+    async def _fade_out(self, now: datetime) -> dict[str, Any]:
+        """Lower the volume step by step, stop, then put the volume back (silently).
+
+        Returns:
+            ``{"volume_note"}``, or ``{"error"}`` if the speakers refused (it's
+            tried again at the next check).
+        """
+        player = self.app.player
+        try:
+            start = (await asyncio.to_thread(player.now_playing)).volume
+            for i in range(1, FADE_STEPS + 1):
+                await asyncio.to_thread(player.set_volume, round(start * (FADE_STEPS - i) / FADE_STEPS))
+                await asyncio.sleep(self.fade_seconds / FADE_STEPS)
+            await asyncio.to_thread(player.stop)
+            await asyncio.to_thread(player.set_volume, start)
+        except Exception as exc:     # leave it be; the next check tries again
+            log.warning("Orchestrator couldn't fade out at bedtime: %s", exc)
+            return {"error": f"couldn't fade out: {exc}"}
+        self._faded_at = now
+        self._seen = (False, None)   # our own stop, not the person's
+        return {"volume_note": f"faded out and stopped; volume back at {start} for next time"}
+
+    async def _follow_volume(self, s: Situation) -> dict[str, Any]:
+        """Reset the volume in the morning, then add each part's change as it begins.
+
+        Returns:
+            ``{"volume", "volume_note"}`` when the volume was changed, else ``{}``.
+        """
+        plan, now = s.plan, s.now
+        if not plan.enabled or not plan.awake(now) or s.in_safety_quiet:
+            return {}
+        changes = plan.volume_changes_until(now)
+        if self._reset_day != now.date():                  # the first check today
+            self._reset_day, self._volume_mark = now.date(), changes
+            wake = datetime.combine(now.date(), plan.wake_sleep(now.date())[0])
+            if plan.morning_volume is None or now - wake > timedelta(hours=MORNING_RESET_HOURS):
+                return {}
+            target = plan.morning_volume + changes
+            applied = await self._volume(self.app.player.set_volume, target)
+            return {"volume": applied, "volume_note": f"morning reset to {target}"} if applied is not None else {}
+        step = changes - self._volume_mark
+        if not step:
+            return {}
+        applied = await self._volume(self.app.player.change_volume, step)
+        if applied is None:
+            return {}                                       # try again at the next check
+        self._volume_mark = changes
+        return {"volume": applied, "volume_note": f"{step:+d} for the new part of the day"}
+
+    async def _volume(self, fn: Callable[[int], int], value: int) -> int | None:
+        """Set or change the group volume (capped by the safety limits); None if the speakers refused."""
+        try:
+            return await asyncio.to_thread(fn, value)
+        except Exception as exc:     # the music matters more than the volume: carry on
+            log.warning("Orchestrator couldn't change the volume (%s): %s", value, exc)
+            return None
 
     def message(self, s: Situation, d: Decision) -> str:
         """The note that wakes the agent: why, which part of the day, and what's playing."""

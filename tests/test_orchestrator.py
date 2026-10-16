@@ -15,8 +15,9 @@ NINE = datetime(2026, 10, 14, 9, 0)      # a Wednesday; wake 08:00, bed 23:00
 
 
 def plan(**kw):
-    slots = [Slot("wake", "gentle"), Slot("14:00", "afternoon groove"), Slot("sleep-1h", "", quiet=True)]
-    return DayPlan(**{"enabled": True, "slots": slots, **kw})
+    slots = [Slot("wake", "gentle"), Slot("14:00", "afternoon groove", volume_change=3),
+             Slot("18:00", "dinner", volume_change=-2), Slot("sleep-1h", "", quiet=True)]
+    return DayPlan(**{"enabled": True, "morning_volume": 8, "slots": slots, **kw})
 
 
 def situation(now=NINE, **kw):
@@ -157,3 +158,81 @@ def test_stopping_through_the_dj_or_gui_starts_a_quiet_period_and_music_ends_it(
     run(tools.play_tracks([{"title": "So What", "artist": "Miles Davis"}]))
     assert memory.quiet_since() == memory_since
     assert memory.quiet_history()[0]["from"] == "gui"
+
+
+# ----------------------------------------------------------------- volume per part of the day
+def test_the_volume_is_reset_each_morning(orch):
+    o, player, _, _, _ = orch
+    player.set_volume(30)                            # left loud last night
+    first = run(o.check())
+    assert first["volume"] == 8 and first["volume_note"] == "morning reset to 8"
+    assert player.now_playing().volume == 8
+    player.set_volume(12)                            # you turn it up: not reset again today
+    assert "volume" not in run(o.check())
+
+
+def test_new_parts_nudge_the_volume_on_top_of_your_own_changes(orch):
+    o, player, _, clock, _ = orch
+    run(o.check())                                   # 09:00: reset to 8
+    player.play(CATALOGUE[:6])
+    player.set_volume(12)                            # you turn it up just before the afternoon
+    clock.t = clock.t.replace(hour=14, minute=2)
+    after = run(o.check())
+    assert after["volume"] == 15 and after["volume_note"] == "+3 for the new part of the day"
+    clock.t = clock.t.replace(hour=14, minute=10)
+    assert "volume" not in run(o.check())            # once per part
+
+
+def test_parts_missed_between_checks_are_caught_up(orch):
+    o, player, _, clock, _ = orch
+    run(o.check())
+    clock.t = clock.t.replace(hour=18, minute=30)    # the afternoon (+3) and dinner (-2) both began
+    assert run(o.check())["volume"] == 9
+
+
+def test_no_morning_reset_after_a_mid_day_restart(orch):
+    o, player, _, clock, _ = orch
+    clock.t = clock.t.replace(hour=15)               # first check of the day, long after waking
+    player.set_volume(20)
+    assert "volume" not in run(o.check()) and player.now_playing().volume == 20
+    clock.t = clock.t.replace(hour=18, minute=5)
+    assert run(o.check())["volume"] == 18            # but later parts still nudge it
+
+
+# ----------------------------------------------------------------- bedtime
+def test_bedtime_fades_out_only_the_orchestrators_music():
+    late = NINE.replace(hour=23, minute=5)
+    assert decide(situation(now=late, playing=True, music_is_ours=True)).action == "bedtime"
+    assert decide(situation(now=late, playing=True)).action == "idle"                  # music you chose
+    assert decide(situation(now=late, music_is_ours=True)).action == "idle"            # already silent
+    once = situation(now=late, playing=True, music_is_ours=True, faded_at=late - timedelta(minutes=20))
+    assert decide(once).action == "idle"                                               # you pressed play again
+    assert decide(situation(now=late, playing=True, music_is_ours=True,
+                            plan=plan(enabled=False))).action == "idle"
+
+
+def test_bedtime_fade_stops_then_puts_the_volume_back(orch):
+    o, player, memory, clock, sent = orch
+    o.fade_seconds = 0
+    dayplan.save(plan(sleep="22:30"), o.app.day_plan_path)    # bedtime before the safety quiet hours
+    player.play(CATALOGUE[:6])
+    memory.record_plays(CATALOGUE[:6], None, "auto", "me")      # queued by the orchestrator's DJ
+    player.set_volume(11)
+    clock.t = clock.t.replace(hour=22, minute=35)
+    out = run(o.check())
+    assert out["action"] == "bedtime" and "faded out" in out["volume_note"]
+    np = player.now_playing()
+    assert np.state == "STOPPED" and np.volume == 11 and not sent
+    player.resume()                                              # you want a bit more: not fought
+    clock.t += timedelta(minutes=5)
+    assert run(o.check())["action"] == "idle" and player.now_playing().state == "PLAYING"
+
+
+def test_bedtime_leaves_music_you_chose(orch):
+    o, player, memory, clock, _ = orch
+    o.fade_seconds = 0
+    player.play(CATALOGUE[:6])
+    memory.record_plays(CATALOGUE[:6], None, "dj", "me")
+    clock.t = clock.t.replace(hour=23, minute=5)
+    assert run(o.check())["action"] == "idle" and player.now_playing().state == "PLAYING"
+
