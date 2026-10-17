@@ -137,7 +137,9 @@ export default {
         dislikeBtn.classList.remove("disliked");
         loadQueue();
       }
-      showLiked(Boolean(np.liked));   // saved likes, so a liked song shows liked whenever it plays
+      // Saved likes, so a liked song shows liked whenever it plays. (No "liked" field means an
+      // older server that doesn't know: leave the button as it is rather than greying it.)
+      if ("liked" in np) showLiked(Boolean(np.liked));
       tickProgress();
     }
 

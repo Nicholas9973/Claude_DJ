@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-music-dj"
-version = "0.5.0"
-description = "A Claude agent that picks and plays music on Sonos, controlled from Discord."
+version = "0.6.0"
+description = "Claude agents that pick and play music on Sonos: a DJ (Discord and a local GUI), a taste curator, and a day-plan orchestrator."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

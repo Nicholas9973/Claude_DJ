@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 # Errors that usually mean "our picture of the speakers is out of date".
 TRANSIENT = (SoCoException, OSError, requests.RequestException)
+UNPLAYABLE_UPNP_ERROR = "800"   # the speaker refused this item (e.g. not licensed in this country)
 
 Rooms = str | list[str] | None
 
@@ -304,6 +305,8 @@ class SonosPlayer(Player):
             except Exception as exc:  # one bad track shouldn't sink the request
                 log.warning("Could not queue %s: %s", item.ref, exc)
                 result.failed.append((item, str(exc)))
+                if str(getattr(exc, "error_code", "")) == UNPLAYABLE_UPNP_ERROR:
+                    self.provider.unplayable.add(item.ref)   # lookups pick another version next time
 
         if not result.queued:
             raise PlayerError("None of the items could be queued: "

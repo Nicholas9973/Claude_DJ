@@ -240,3 +240,14 @@ def test_often_requested_genres_and_playlist_suggestions():
         run(tools.suggest_playlist(" ", "why"))
     history = memory.listening_history()
     assert history["dj_requests"][0]["genre"] == "techno"
+
+
+def test_a_version_the_speakers_refuse_is_passed_over_next_time():
+    tools, _ = make_tools()
+    first = tools.provider.lookup_track("One More Time", "Daft Punk").item
+    tools.provider.bad_refs.add(first.ref)            # e.g. not licensed in this country
+    with pytest.raises(ToolError, match="could be queued"):
+        run(tools.play_tracks([{"title": "One More Time", "artist": "Daft Punk"}]))
+    out = run(tools.play_tracks([{"title": "One More Time", "artist": "Daft Punk"}]))
+    assert out["queued"] == 1 and first.ref in tools.provider.unplayable
+

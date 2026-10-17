@@ -89,6 +89,16 @@ class MusicProvider(ABC):
     def to_native(self, item: MediaItem) -> Any:
         """Return the object the Player needs to queue this item."""
 
+    @property
+    def unplayable(self) -> set[str]:
+        """Refs the speakers refused to queue (e.g. not licensed here); lookups pass over them.
+
+        Kept only while the program runs: the next start tries them again.
+        """
+        if not hasattr(self, "_unplayable"):
+            self._unplayable: set[str] = set()
+        return self._unplayable
+
     # ------------------------------------------------------------ lookup
     def lookup_track(self, title: str, artist: str | None = None,
                      album: str | None = None) -> TrackLookup:
@@ -105,7 +115,8 @@ class MusicProvider(ABC):
             album: Requested album, if known; prefers that version.
 
         Returns:
-            The match, every attempt, and on a miss the artist's real tracks.
+            The match (the best-scoring version the speakers haven't refused),
+            every attempt, and on a miss the artist's real tracks.
         """
         result = TrackLookup(title, artist)
         plans = [(f"{artist} {title}", 10)] if artist else []
@@ -116,8 +127,10 @@ class MusicProvider(ABC):
         for query, limit in plans:
             attempt = self._search_scored(query, title, artist, album, limit)
             result.attempts.append(attempt)
-            if attempt.results and attempt.results[0][0] > 0:
-                result.item = attempt.results[0][1]
+            best = next((item for score, item in attempt.results
+                         if score > 0 and item.ref not in self.unplayable), None)
+            if best:
+                result.item = best
                 return result
 
         if artist:

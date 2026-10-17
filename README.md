@@ -3,15 +3,17 @@
 Message a Discord bot ("put on something upbeat, I'm cooking") and a Claude
 agent picks real tracks, finds them on Qobuz and plays them on your Sonos
 speakers. It considers the time of day, weather and what you've liked or
-skipped before, and learns from your feedback.
+skipped before, and learns from your feedback. Left to itself, it can also
+keep fitting music playing through the day, following a rough plan you write.
 
 There are three agents with different jobs:
 
 - the **DJ** plays music and controls playback (Discord, the GUI's Now
-  playing page, the terminal). It picks one genre per request and chooses
-  within it by your taste, keeps to that genre for follow-ups for about an
-  hour, now and then plays a whole celebrated album, and leaves the curator a
-  note when a kind of request comes up often enough to deserve a playlist;
+  playing page, the terminal). For each request it settles on one genre or
+  coherent theme and chooses within it by your taste, keeps to it for
+  follow-ups for about an hour, now and then plays a whole celebrated album,
+  and leaves the curator a note when a kind of request comes up often enough
+  to deserve a playlist;
 - the **curator** shapes your taste: it saves what you tell it ("I'm done with
   Coldplay"), runs listening quizzes, builds saved playlists the DJ can play
   in one step, and reviews and edits your day plan (the GUI's Chat page, or
@@ -30,11 +32,13 @@ The DJ and orchestrator run on Sonnet and the curator (used less often) on
 Opus by default (`[agent]` in `config.toml`); the System page can switch each one.
 
 ```
-GUI / Discord / terminal ──► Claude agent: DJ or curator (Agent SDK, your Claude subscription)
-                          │  each can only call its own list of tools
+GUI / Discord / terminal ──► Claude agents (Agent SDK, your Claude subscription)
+day_plan.toml ──► orchestrator  each can only call its own list of tools
+                          │
                           ▼
-   DJ:      context · play_tracks · play_playlist · search · controls · feedback
-   curator: taste · preferences · feedback · save_playlist · samples for quizzes
+   DJ:           context · play_tracks · play_playlist · search · controls · feedback
+   curator:      taste · preferences · feedback · playlists · quiz samples · day plan
+   orchestrator: day plan · context · ask_dj (it never plays or stops music itself)
             │                  │                        │
    Qobuz search via Sonos   Sonos speakers (SoCo)   memory + playlists (SQLite)
 ```
@@ -77,7 +81,8 @@ two orchestrators will run the day. `--no-bot` starts neither.) Pages:
 
 - **Now playing**: cover art, progress, play/pause/skip/stop, volume (up to the
   safety cap), 👍 / 👎, the queue, and your chat with the DJ (separate from
-  Discord). Each reply shows the tools Claude used. The **Speakers** card has a
+  Discord). 👍 is green while a song you've liked plays (liked anywhere: GUI,
+  Discord or a quiz); click it again to take the like back. Each reply shows the tools Claude used. The **Speakers** card has a
   slider per room: set Night 5 quieter than the Dining Room and that balance is
   remembered, so the main slider and new DJ sets move all rooms together.
   "Level all" puts them back at one level. The DJ can do this too ("turn Night
@@ -100,9 +105,10 @@ two orchestrators will run the day. `--no-bot` starts neither.) Pages:
   no music. The volume is reset to the **morning volume** at the first check
   after you wake up, so last night's level never carries over; after that each
   part's change (e.g. +3) is added to whatever the volume is when it begins, so
-  your own adjustments are kept. "Check
-  now" runs a check immediately; "Recent activity" shows what it did and why.
-  It ships turned **off**: check the times, then switch it on.
+  your own adjustments are kept. At bedtime the orchestrator's own music fades
+  out. "Check now" runs a check immediately; "Recent activity" shows what it
+  did and why, including volume changes. The plan is the file `day_plan.toml`,
+  which you can also edit by hand or through the curator.
 - **Playlists**: saved playlists. Play, shuffle or queue them; rename them and
   edit the description (the DJ reads it to decide when a playlist fits); add
   or remove tracks.
@@ -127,8 +133,10 @@ two orchestrators will run the day. `--no-bot` starts neither.) Pages:
 - **System**: Discord bot status with start/stop, each agent's model (applies
   from its next request), safety settings, and the live log.
 
-`--no-bot` runs only the GUI, `--no-browser` skips opening a tab, and `[gui]`
-in `config.toml` sets the port. The GUI has no login, so it only listens on
+`--no-bot` runs only the GUI (no bot and no orchestrator, so it's safe next to
+a running bot), `--no-orchestrator` keeps the bot but doesn't follow the day
+plan, `--no-browser` skips opening a tab, and `[gui]` in `config.toml` sets the
+port. The GUI has no login, so it only listens on
 this PC (`127.0.0.1`).
 
 **Discord.** Only the user IDs in `DISCORD_ALLOWED_USER_IDS` are answered, in
@@ -164,11 +172,12 @@ python -m music_agent.cli link | services                  # music service accou
 
 | Piece | What it does |
 |---|---|
-| `music_agent/agent/tools.py` | The DJ's actions: get context, queue tracks, play a saved playlist, search, controls, volume, record feedback. |
+| `music_agent/agent/tools.py` | The DJ's actions: get context, queue tracks, play a saved playlist, search, controls, volume, record feedback, suggest a playlist idea to the curator. |
 | `music_agent/agent/curator_tools.py` | The curator's extra actions: read the taste profile and listening history, add/change/remove preferences, build quiz findings from evidence, look up track qualities, nudge or reset scores, write in its notebook, forget feedback, save playlists. |
-| `music_agent/agent/prompt.py` | Both agents' instructions in plain English. **Edit this to change their taste and behaviour.** |
+| `music_agent/agent/dayplan_tools.py` | Day plan actions: read and change the plan (curator), read it and ask the DJ for music (orchestrator). |
+| `music_agent/agent/prompt.py` | The agents' instructions in plain English. **Edit this to change their taste and behaviour.** |
 | `music_agent/agent/server.py` | How each tool is described to Claude (names, descriptions, JSON schemas) and which tools each agent gets (`ROLE_TOOLS`). |
-| `music_agent/agent/session.py` | Agent SDK setup: locks everything else down, runs the conversation, logs each request. `role` picks the DJ or the curator. |
+| `music_agent/agent/session.py` | Agent SDK setup: locks everything else down, runs the conversation, logs each request. `role` picks the DJ, the curator or the orchestrator, and each role's model. |
 | `music_agent/providers/` | Finding music. `sonos_service.py` searches any service linked in the Sonos app; `base.py` tries progressively broader searches; `matching.py` picks the original recording over covers, karaoke and live versions. |
 | `music_agent/players/sonos.py` | Speakers: grouping, queue, volume. Enforces the volume cap and quiet hours, and recovers from stale speaker state after sleep or network drops. |
 | `music_agent/players/balance.py` | The per-room volume balance (saved in `music.db`), kept when the group volume changes. |
@@ -179,7 +188,9 @@ python -m music_agent.cli link | services                  # music service accou
 | `music_agent/learning/watcher.py` | Notices tracks you skip early or hear to the end. |
 | `music_agent/trackinfo.py` | Track qualities (original year, approximate tempo, style tags, popularity) from MusicBrainz and Deezer, no keys needed, cached in `music.db`. Only code goes online; the curator gets the results. |
 | `music_agent/weather.py` | Local weather (Open-Meteo, no key). |
-| `music_agent/runtime.py` | The long-running service the GUI and Discord share: one set of speakers, memory and watcher, the bot, and the conversations. |
+| `music_agent/dayplan.py` | The day plan file: reading, checking and saving it, and working out today's times (relative to waking up and bedtime). |
+| `music_agent/orchestrator.py` | When to wake the orchestrator agent (checked in code every few minutes, so Claude is asked only when something needs doing), the volume through the day, and the bedtime fade-out. |
+| `music_agent/runtime.py` | The long-running service the GUI and Discord share: one set of speakers, memory and watcher, the bot, the orchestrator, and the conversations. |
 | `music_agent/gui/` | The control panel: `routes/` is the JSON API (one file per feature, browse it at `/docs`); `static/` is plain HTML/CSS/JS with one file per page and no build step. |
 | `music_agent/cli.py`, `chat.py`, `discord_bot.py` | The other ways in. |
 | `music_agent/app.py`, `config.py`, `models.py`, `logs.py`, `text.py` | Wiring, settings, shared data types, logging, text helpers. |
@@ -234,7 +245,8 @@ service linked in your Sonos app) in `config.local.toml`, then run
 
 | File | Contents | In git? |
 |---|---|---|
-| `config.toml` | Shared defaults: service, rooms, model, safety limits, memory | yes |
+| `config.toml` | Shared defaults: service, rooms, each agent's model, safety limits, memory | yes |
+| `day_plan.toml` | The day plan the orchestrator follows (also editable on the Day page) | yes |
 | `config.local.toml` | Your overrides (town, speaker IPs...); wins over `config.toml` | no |
 | `.env` | Discord token and IDs (template: `.env.example`) | no |
 | `data/` | `music.db` (memory), `logs/gui.log`, `logs/bot.log`, `logs/agent.jsonl` (every request) | no |
@@ -267,5 +279,6 @@ developer portal; deleting the file afterwards is not enough.
 
 ## Status
 
-Done: speakers and search, agent, memory and feedback, Discord bot.
-Next: run the bot as a background service that starts with Windows.
+Done: speakers and search, the DJ, curator and orchestrator agents, memory and
+taste learning, the Discord bot and the GUI.
+Next: start automatically with Windows.

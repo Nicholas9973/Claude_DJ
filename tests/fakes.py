@@ -69,7 +69,7 @@ class FakeSpeaker:
 
     def add_to_queue(self, item, position=0):
         if getattr(item, "fail", False):
-            raise RuntimeError("unplayable")
+            raise Refused("UPnP Error 800 received")
         if position:
             self.queue_items.insert(position - 1, item)
             return position
@@ -124,6 +124,12 @@ class FakeProvider(MusicProvider):
 
     def to_native(self, item):
         return SimpleNamespace(title=item.title, fail=item.ref in self.bad_refs)
+
+
+class Refused(Exception):
+    """What SoCo raises when a speaker won't queue an item (UPnP error 800)."""
+
+    error_code = "800"
 
 
 # ----------------------------------------------------------------- clocks

@@ -150,8 +150,12 @@ tests/                  one file per module; shared fakes/builders in tests/fake
 - **Windows:** a venv breaks if the folder moves (recreate it). Python 3.13
   removed `audioop`; discord.py pulls in `audioop-lts`. The project used to live
   in OneDrive, which overwrote files; it's in `C:\dev` now for that reason.
-- Real usage so far (45 requests): 91% of requested songs found, median ~5 s and
-  ~$0.02 of credit per request, Sonnet.
+- Real usage (2026-10-14 to 10-17, 108 requests, no failures): 96% of requested songs
+  found. Since the genre-first DJ, a DJ request takes a median ~30 s and ~$0.08 of credit
+  (Sonnet); an orchestrator run ~$0.05 plus its DJ request. Earlier (45 requests): ~5 s, ~$0.02.
+- **UPnP error 800** on `add_to_queue` means the speaker won't play that item (e.g. not
+  licensed here), though search lists it. `SonosPlayer.play` adds the ref to
+  `provider.unplayable` (in-process) and `lookup_track` passes over it next time.
 - **Volume balance:** group volume = the volume-source room's level; other rooms play at
   that plus their saved difference (`SpeakerBalance`), clamped to the cap per speaker.
   `set_room_volume` saves the current differences of all rooms. Use `_apply_volume` /
@@ -175,7 +179,7 @@ tests/                  one file per module; shared fakes/builders in tests/fake
   last request choosing it) and `often_requested_genres_last_30_days`; the DJ's
   `suggest_playlist` writes a notebook note with author `dj` for the curator. Saved playlists
   are now used sparingly (only when named or an exact fit). Old `music.db` files get the
-  notebook rebuilt once to allow `'dj'` (`Memory._allow_dj_notes`).
+  notebook rebuilt once to allow `'dj'` (`db.widen_check`).
 - **Models per role:** `[agent] model` (DJ, sonnet), `curator_model` (opus) and
   `orchestrator_model` (sonnet); the System page's choice (`agent_models` table) wins;
   `dj-chat --model` wins over both.

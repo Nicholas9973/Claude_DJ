@@ -192,9 +192,9 @@ class MusicAgent:
         """
         if self._client is None:
             await self.start()
-        elif self.model != self._model:     # chosen on the System page mid-conversation
-            await self._client.set_model(self.model)
-            self._model = self.model
+        elif (wanted := self.model) != self._model:     # chosen on the System page mid-conversation
+            await self._client.set_model(wanted)
+            self._model = wanted
         turn = Turn(prompt=text)
         if self.memory:
             self.tools.request_id = self.memory.start_request(text, self._model, agent=self.role)

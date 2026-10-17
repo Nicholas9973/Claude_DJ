@@ -281,7 +281,8 @@ class Orchestrator:
             self.last_check = entry
             if decision.action != "idle" or "volume" in entry:
                 self.history.append(entry)
-                log.info("Orchestrator: %s (%s)%s", decision.action, decision.reason,
+                log.info("Orchestrator: %s (%s)%s%s", decision.action, decision.reason,
+                         f"; volume {entry['volume']} ({entry['volume_note']})" if "volume" in entry else "",
                          f": {entry['reply']}" if entry.get("reply") else "")
             return entry
 

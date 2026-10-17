@@ -40,7 +40,6 @@ DEEZER = "https://api.deezer.com"
 MB_INTERVAL_S = 1.1                 # MusicBrainz allows one request per second
 MAX_AGE_DAYS = {"found": 180, "not_found": 30, "error": 1}   # when a cached answer is looked up again
 POPULARITY = (("hit", 700_000), ("well known", 400_000), ("known", 150_000), ("deep cut", 0))  # Deezer rank
-POPULARITIES = tuple(name for name, _ in POPULARITY)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS track_info (       -- qualities looked up in public music databases (a cache)
